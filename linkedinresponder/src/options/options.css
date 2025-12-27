@@ -1,0 +1,114 @@
+body {
+  margin: 0;
+  background: #f8fafc;
+  font-family: Inter, Arial, sans-serif;
+}
+.options-root {
+  max-width: 560px;
+  margin: 12px auto;
+  padding: 24px;
+  background: #ffffff;
+  border-radius: 16px;
+  box-shadow: 0 4px 8px #0001;
+}
+
+input[type="email"] {
+  width: 95%;
+  padding: 10px 10px;
+  border-radius: 8px;
+  border: 1px solid #bcdffb;
+  background: #fff;
+  font-size: 16px;
+  margin-bottom: 12px;
+  letter-spacing: 0.03em;
+}
+
+.logo {
+  width: 140px;
+  margin-bottom: 10px;
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+textarea {
+  width: 95%;
+  border-radius: 8px;
+  border: 1px solid #afcde5;
+  font-size: 14px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  height: 120px;
+  resize: vertical;
+  font-family: inherit;
+  color: #222;
+  background: #fff;
+}
+
+h2 {
+  text-align: center;
+  margin: 0 0 8px 0;
+  color: #0a66c2;
+}
+label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+input[type="password"],
+input[type="number"] {
+  width: 95%;
+  padding: 10px 10px;
+  border-radius: 8px;
+  border: 1px solid #bcdffb;
+  background: #fff;
+  font-size: 16px;
+  margin-bottom: 12px;
+  letter-spacing: 0.07em;
+}
+.delay-inputs label {
+  display: inline-block;
+  margin-right: 8px;
+  font-weight: 400;
+}
+.delay-inputs input[type="number"] {
+  width: 90px;
+  padding: 6px;
+  border-radius: 6px;
+  border: 1px solid #eee;
+  display: inline-block;
+  margin-right: 10px;
+}
+button {
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  background: #0a66c2;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover {
+  background: #084b91;
+}
+.success {
+  color: #2e7d32;
+  text-align: center;
+  margin-top: 8px;
+}
+.error {
+  color: #c62828;
+  text-align: center;
+  margin-top: 8px;
+}
+.note {
+  color: #777;
+  font-size: 12px;
+  text-align: center;
+  margin-top: 10px;
+}
+a {
+  color: #0a66c2;
+  text-decoration: underline;
+}
