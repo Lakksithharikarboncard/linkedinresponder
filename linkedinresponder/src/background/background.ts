@@ -48,14 +48,7 @@ function runScan() {
   );
 }
 
-chrome.action.onClicked.addListener(() => {
-  chrome.windows.create({
-    url: chrome.runtime.getURL("window.html"),
-    type: "popup",
-    width: 600,
-    height: 400
-  });
-});
+// Remove this entire block - popup will open automatically from manifest
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
