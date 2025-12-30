@@ -1,264 +1,713 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { BotCommand, BotResponse, BotLogEntry } from "../shared/types";
+import { BotCommand, BotStatus, BotLogEntry, BotStats } from "../shared/types";
 import "./popup.css";
 
-type TabCommand = BotCommand | { type: "PING_TEST" };
+const Popup = () => {
+  const [running, setRunning] = useState(false);
+  const [stats, setStats] = useState<BotStats>({
+    chatsProcessed: 0,
+    repliesSent: 0,
+    leadsFound: 0,
+    startTime: null,
+    tokensUsed: 0,
+    currentModel: "",
+  });
+  const [logs, setLogs] = useState<BotLogEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showSummary, setShowSummary] = useState(false);
+  const [sessionSummary, setSessionSummary] = useState<any>(null);
+  const [copied, setCopied] = useState(false);
 
-function openOptionsPage() {
-  if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
-  else window.open(chrome.runtime.getURL("options.html"));
-}
+  const [nChats, setNChats] = useState(10);
+  const [model, setModel] = useState("gpt-4o-mini");
+  const [useGroq, setUseGroq] = useState(false);
+  const [groqModel, setGroqModel] = useState("llama-3.3-70b-versatile");
+  const [strictHours, setStrictHours] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-const Popup: React.FC = () => {
-  const [nChats, setNChats] = useState<number>(5);
-  const [botRunning, setBotRunning] = useState<boolean>(false);
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const [botLog, setBotLog] = useState<BotLogEntry[]>([]);
-  const [hasApiKey, setHasApiKey] = useState<boolean>(true);
-  const [selectedModel, setSelectedModel] = useState<string>("gpt-4o-mini");
+  const sendToContent = async (msg: BotCommand): Promise<any> => {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tabs[0]?.id) throw new Error("No active tab");
 
-  useEffect(() => {
-    chrome.storage.local.get(["botLog", "openaiApiKey", "selectedModel"], (res) => {
-      setBotLog(res.botLog || []);
-      setHasApiKey(!!res.openaiApiKey);
-      setSelectedModel(res.selectedModel || "gpt-4o-mini");
-    });
-
-    const onChange = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
-      if (area === 'local') {
-        if (changes.botLog) setBotLog(changes.botLog.newValue || []);
-        if (changes.openaiApiKey) setHasApiKey(!!changes.openaiApiKey.newValue);
-        if (changes.selectedModel) setSelectedModel(changes.selectedModel.newValue || "gpt-4o-mini");
-      }
-    };
-    chrome.storage.onChanged.addListener(onChange);
-    return () => chrome.storage.onChanged.removeListener(onChange);
-  }, []);
-
-  const handleModelChange = (model: string) => {
-    setSelectedModel(model);
-    chrome.storage.local.set({ selectedModel: model });
-  };
-
-  const sendMessageToTab = <T,>(tabId: number, msg: TabCommand): Promise<T> =>
-    new Promise((resolve, reject) => {
-      chrome.tabs.sendMessage(tabId, msg, (res) => {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve(res as T);
+    return new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabs[0].id!, msg, (response) => {
+        if (chrome.runtime.lastError) resolve(null);
+        else resolve(response);
       });
     });
-
-  const getActiveUserTab = async (): Promise<{ id: number; url: string }> => {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const tab = tabs[0];
-    if (!tab?.id) throw new Error("No active tab");
-    return { id: tab.id, url: tab.url || "unknown" };
   };
 
-  async function runBot() {
-    setFeedback(null);
-    setBotRunning(true);
-    try {
-      const { id: tabId, url: currentUrl } = await getActiveUserTab();
-      
-      if (!currentUrl.includes("linkedin.com/messaging")) {
-        setFeedback("Please navigate to LinkedIn Messaging page first");
-        setBotRunning(false);
-        return;
+  useEffect(() => {
+    // ✅ Load saved toggle states first
+    chrome.storage.local.get(
+      ["savedUseGroq", "savedGroqModel", "savedStrictHours"],
+      (data) => {
+        if (data.savedUseGroq !== undefined) setUseGroq(data.savedUseGroq);
+        if (data.savedGroqModel) setGroqModel(data.savedGroqModel);
+        if (data.savedStrictHours !== undefined) setStrictHours(data.savedStrictHours);
       }
+    );
 
-      const ping = await sendMessageToTab<string>(tabId, { type: "PING_TEST" });
-      if (ping !== "✅ Content script active!") {
-        setFeedback("Content script not ready. Please refresh the page.");
-        setBotRunning(false);
-        return;
+    const syncState = async () => {
+      try {
+        const status: BotStatus = await sendToContent({ type: "GET_STATUS" });
+        if (status) {
+          setRunning(status.running);
+          setStats(status.stats);
+          setLogs(status.logs);
+          setErrorMsg(null);
+        } else {
+          setErrorMsg("Navigate to LinkedIn Messaging");
+        }
+      } catch {
+        setErrorMsg("Connect to LinkedIn Messaging");
+      } finally {
+        setLoading(false);
       }
+    };
 
-      const resp = await sendMessageToTab<BotResponse>(tabId, { type: "START_BOT", n: nChats + 1 });
-      if (resp.status === "ok") {
-        setFeedback("Bot started successfully! 🚀");
-      } else {
-        setFeedback("Failed to start bot");
-        setBotRunning(false);
-      }
-    } catch (err: any) {
-      setFeedback(err.message || "Error starting bot");
-      setBotRunning(false);
-    }
+    syncState();
+    const interval = setInterval(syncState, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ✅ Handlers to save toggle states
+  const handleUseGroqChange = (value: boolean) => {
+    setUseGroq(value);
+    chrome.storage.local.set({ savedUseGroq: value });
+  };
+
+  const handleGroqModelChange = (value: string) => {
+    setGroqModel(value);
+    chrome.storage.local.set({ savedGroqModel: value });
+  };
+
+  const handleStrictHoursChange = (value: boolean) => {
+    setStrictHours(value);
+    chrome.storage.local.set({ savedStrictHours: value });
+  };
+
+  const handleStart = async () => {
+    setLoading(true);
+    await sendToContent({ type: "START_BOT", config: { nChats, model, useGroq, groqModel, strictHours } });
+    setRunning(true);
+    setLoading(false);
+  };
+
+  const handleStop = async () => {
+    setLoading(true);
+    await sendToContent({ type: "STOP_BOT" });
+    
+    // Calculate session summary
+    const duration = stats.startTime ? Date.now() - stats.startTime : 0;
+    const durationMins = Math.floor(duration / 60000);
+    const durationSecs = Math.floor((duration % 60000) / 1000);
+    
+    setSessionSummary({
+      duration: `${durationMins}m ${durationSecs}s`,
+      processed: stats.chatsProcessed,
+      replied: stats.repliesSent,
+      skipped: stats.chatsProcessed - stats.repliesSent,
+      leads: stats.leadsFound,
+      tokens: stats.tokensUsed,
+      model: stats.currentModel || (useGroq ? groqModel : model),
+    });
+    
+    setRunning(false);
+    setLoading(false);
+    setShowSummary(true);
+  };
+
+  const handleCopyLogs = () => {
+    const logText = logs
+      .map((log) => {
+        const time = new Date(log.time).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        return `[${time}] ${log.actor}: ${log.message}`;
+      })
+      .join("\n");
+    
+    navigator.clipboard.writeText(logText).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const openOptionsPage = () => {
+    if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
+    else window.open(chrome.runtime.getURL("options.html"));
+  };
+
+  const uptime = (() => {
+    if (!stats.startTime) return "—";
+    const secs = Math.max(0, Math.floor((Date.now() - stats.startTime) / 1000));
+    const mm = String(Math.floor(secs / 60)).padStart(2, "0");
+    const ss = String(secs % 60).padStart(2, "0");
+    return `${mm}:${ss}`;
+  })();
+
+  // Calculate token limit based on current model
+  const getTokenLimit = () => {
+    if (!useGroq) return 0;
+    if (groqModel === "openai/gpt-oss-120b") return 200000;
+    if (groqModel.includes("kimi")) return 300000;
+    if (groqModel.includes("scout") || groqModel.includes("maverick") || groqModel.includes("qwen")) return 500000;
+    return 100000;
+  };
+
+  const tokenLimit = getTokenLimit();
+  const tokenPercent = tokenLimit > 0 ? Math.min(100, Math.round((stats.tokensUsed / tokenLimit) * 100)) : 0;
+
+  if (loading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: "14px", color: "#173a35" }}>Loading...</div>
+        </div>
+      </div>
+    );
   }
-
-  async function stopBot() {
-    setFeedback(null);
-    try {
-      const { id: tabId } = await getActiveUserTab();
-      const resp = await sendMessageToTab<BotResponse>(tabId, { type: "STOP_BOT" });
-      if (resp.status === "stopped") {
-        setFeedback("Bot stopped");
-        setBotRunning(false);
-      } else {
-        setFeedback("Failed to stop bot");
-      }
-    } catch (err: any) {
-      setFeedback(err.message || "Error stopping bot");
-    }
-  }
-
-  const models = [
-    { id: "gpt-4o-mini", name: "GPT-4o Mini", cost: "$0.15/1M", recommended: true },
-    { id: "gpt-4o", name: "GPT-4o", cost: "$2.50/1M", recommended: false },
-    { id: "gpt-4-turbo", name: "GPT-4 Turbo", cost: "$10/1M", recommended: false },
-  ];
 
   return (
-    <div className="bg-base-100 min-h-screen">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-primary to-secondary p-4 text-primary-content">
-        <h1 className="text-xl font-bold flex items-center gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-          </svg>
-          LinkedIn AI Responder
-        </h1>
-        <p className="text-sm opacity-90 mt-1">Automate your LinkedIn replies</p>
-      </div>
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "linear-gradient(135deg, #fbf2c4, #e5c185)" }}>
+      {/* SESSION SUMMARY MODAL */}
+      {showSummary && sessionSummary && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+          onClick={() => setShowSummary(false)}
+        >
+          <div
+            style={{
+              background: "white",
+              borderRadius: "12px",
+              padding: "20px",
+              maxWidth: "320px",
+              width: "90%",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 style={{ fontSize: "16px", fontWeight: "600", color: "#173a35", marginBottom: "16px", textAlign: "center" }}>
+              ✅ Session Complete
+            </h2>
 
-      <div className="p-4 space-y-4">
-        {/* API Key Warning */}
-        {!hasApiKey && (
-          <div className="alert alert-warning shadow-lg">
-            <svg xmlns="http://www.w3.org/2000/svg" className="stroke-current flex-shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
+            <div style={{ display: "grid", gap: "10px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
+                <span style={{ fontSize: "11px", color: "#6c757d" }}>Duration:</span>
+                <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.duration}</span>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
+                <span style={{ fontSize: "11px", color: "#6c757d" }}>Processed:</span>
+                <span style={{ fontSize: "11px", fontWeight: "600", color: "#008585" }}>{sessionSummary.processed}</span>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
+                <span style={{ fontSize: "11px", color: "#6c757d" }}>Replied:</span>
+                <span style={{ fontSize: "11px", fontWeight: "600", color: "#74a892" }}>{sessionSummary.replied}</span>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
+                <span style={{ fontSize: "11px", color: "#6c757d" }}>Skipped:</span>
+                <span style={{ fontSize: "11px", fontWeight: "600", color: "#6c757d" }}>{sessionSummary.skipped}</span>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
+                <span style={{ fontSize: "11px", color: "#6c757d" }}>Leads Found:</span>
+                <span style={{ fontSize: "11px", fontWeight: "600", color: "#c7522a" }}>{sessionSummary.leads}</span>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
+                <span style={{ fontSize: "11px", color: "#6c757d" }}>Tokens Used:</span>
+                <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.tokens.toLocaleString()}</span>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
+                <span style={{ fontSize: "11px", color: "#6c757d" }}>Model:</span>
+                <span style={{ fontSize: "10px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.model}</span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowSummary(false)}
+              style={{
+                width: "100%",
+                marginTop: "16px",
+                padding: "10px",
+                background: "#008585",
+                color: "white",
+                border: "none",
+                borderRadius: "6px",
+                fontSize: "12px",
+                fontWeight: "500",
+                cursor: "pointer",
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* HEADER */}
+      <div
+        style={{
+          background: "linear-gradient(135deg, #c7522a, #008585)",
+          color: "white",
+          padding: "14px 16px",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div
+              style={{
+                width: "36px",
+                height: "36px",
+                background: "rgba(255,255,255,0.2)",
+                borderRadius: "10px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                border: "1px solid rgba(255,255,255,0.3)",
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="white" strokeWidth="2" />
+              </svg>
+            </div>
             <div>
-              <h3 className="font-bold">Setup Required!</h3>
-              <div className="text-xs">Please add your OpenAI API key in settings</div>
+              <div style={{ fontSize: "15px", fontWeight: "600" }}>linkedIn autoresponder</div>
+              <div style={{ fontSize: "10px", opacity: 0.9 }}>Human-like LinkedIn agent</div>
             </div>
           </div>
-        )}
 
-        {/* Status Badge */}
-        <div className="flex justify-center">
-          {botRunning ? (
-            <div className="badge badge-success badge-lg gap-2">
-              <span className="loading loading-spinner loading-xs"></span>
-              Bot Running
+          <div style={{ textAlign: "right" }}>
+            <div
+              style={{
+                padding: "3px 10px",
+                borderRadius: "20px",
+                fontSize: "10px",
+                fontWeight: "500",
+                background: running ? "#74a892" : "rgba(255,255,255,0.2)",
+                border: "1px solid rgba(255,255,255,0.3)",
+              }}
+            >
+              {running ? "● Running" : "○ Idle"}
             </div>
-          ) : (
-            <div className="badge badge-ghost badge-lg">Bot Idle</div>
+            <div style={{ fontSize: "9px", marginTop: "3px", opacity: 0.8 }}>⏱ {uptime}</div>
+          </div>
+        </div>
+
+        {errorMsg && (
+          <div
+            style={{
+              marginTop: "10px",
+              padding: "6px 10px",
+              background: "#fbf2c4",
+              color: "#c7522a",
+              borderRadius: "6px",
+              fontSize: "10px",
+              border: "1px solid #e5c185",
+            }}
+          >
+            ⚠️ {errorMsg}
+          </div>
+        )}
+      </div>
+
+      {/* CONTENT */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "12px", display: "flex", flexDirection: "column", gap: "10px" }}>
+        {/* STATS - Compact */}
+        <div style={{ background: "white", borderRadius: "10px", padding: "10px", border: "1px solid #e5e5e5" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path fillRule="evenodd" clipRule="evenodd" d="M3.6 2.25C2.85442 2.25 2.25 2.85441 2.25 3.6V20.4C2.25 21.1456 2.85441 21.75 3.6 21.75H20.4C21.1456 21.75 21.75 21.1456 21.75 20.4V3.6C21.75 2.85442 21.1456 2.25 20.4 2.25H3.6ZM16.75 8C16.75 7.58579 16.4142 7.25 16 7.25C15.5858 7.25 15.25 7.58579 15.25 8V16C15.25 16.4142 15.5858 16.75 16 16.75C16.4142 16.75 16.75 16.4142 16.75 16V8ZM12 10.25C12.4142 10.25 12.75 10.5858 12.75 11V16C12.75 16.4142 12.4142 16.75 12 16.75C11.5858 16.75 11.25 16.4142 11.25 16V11C11.25 10.5858 11.5858 10.25 12 10.25ZM8.75 13C8.75 12.5858 8.41421 12.25 8 12.25C7.58579 12.25 7.25 12.5858 7.25 13V16C7.25 16.4142 7.58579 16.75 8 16.75C8.41421 16.75 8.75 16.4142 8.75 16V13Z" fill="#173a35"/>
+              </svg>
+              <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>Stats</span>
+            </div>
+            <div style={{ fontSize: "8px", color: "#74a892" }}>● Live</div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px", marginBottom: "8px" }}>
+            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
+              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Processed</div>
+              <div style={{ fontSize: "16px", fontWeight: "600", color: "#008585" }}>{stats.chatsProcessed}</div>
+            </div>
+
+            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
+              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Replied</div>
+              <div style={{ fontSize: "16px", fontWeight: "600", color: "#74a892" }}>{stats.repliesSent}</div>
+            </div>
+
+            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
+              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Leads</div>
+              <div style={{ fontSize: "16px", fontWeight: "600", color: "#c7522a" }}>{stats.leadsFound}</div>
+            </div>
+          </div>
+
+          {/* TOKEN COUNTER */}
+          {useGroq && tokenLimit > 0 && (
+            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                <span style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase" }}>Tokens</span>
+                <span style={{ fontSize: "8px", fontWeight: "600", color: "#173a35" }}>
+                  {stats.tokensUsed.toLocaleString()} / {tokenLimit.toLocaleString()}
+                </span>
+              </div>
+              <div style={{ width: "100%", height: "4px", background: "#dee2e6", borderRadius: "2px", overflow: "hidden" }}>
+                <div
+                  style={{
+                    width: `${tokenPercent}%`,
+                    height: "100%",
+                    background: tokenPercent > 80 ? "#c7522a" : tokenPercent > 50 ? "#e5c185" : "#74a892",
+                    transition: "width 0.3s ease",
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: "7px", color: "#6c757d", marginTop: "2px", textAlign: "right" }}>
+                {tokenPercent}% used
+              </div>
+            </div>
           )}
         </div>
 
-        {/* Model Selector */}
-        <div className="form-control">
-          <label className="label">
-            <span className="label-text font-semibold">AI Model</span>
-            <span className="label-text-alt text-xs">Cost per 1M tokens</span>
-          </label>
-          <select
-            value={selectedModel}
-            onChange={(e) => handleModelChange(e.target.value)}
-            className="select select-bordered w-full"
-            disabled={botRunning}
-          >
-            {models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name} - {model.cost} {model.recommended ? "⭐ Recommended" : ""}
-              </option>
-            ))}
-          </select>
-          <label className="label">
-            <span className="label-text-alt text-xs">
-              {selectedModel === "gpt-4o-mini" && "Best balance of cost & quality"}
-              {selectedModel === "gpt-4o" && "Higher quality, 17x more expensive"}
-              {selectedModel === "gpt-4-turbo" && "Highest quality, 67x more expensive"}
-            </span>
-          </label>
-        </div>
-
-        {/* Chats Input */}
-        <div className="form-control">
-          <label className="label">
-            <span className="label-text font-semibold">Number of Chats to Process</span>
-          </label>
-          <input
-            type="number"
-            value={nChats}
-            min={1}
-            max={50}
-            onChange={(e) => setNChats(Number(e.target.value))}
-            className="input input-bordered w-full"
-            disabled={botRunning}
-          />
-          <label className="label">
-            <span className="label-text-alt">Recommended: 5-10 chats</span>
-          </label>
-        </div>
-
-        {/* Action Buttons */}
-        <div className="flex gap-2">
-          <button
-            className="btn btn-primary flex-1"
-            onClick={runBot}
-            disabled={botRunning || !hasApiKey}
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+        {/* CONTROLS - Compact */}
+        <div style={{ background: "white", borderRadius: "10px", padding: "10px", border: "1px solid #e5e5e5" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px" }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18Z" stroke="#173a35" strokeWidth="1.5"/>
+              <path d="M18 12H12M9 6.80273L12 12M12 12L9 17.1973" stroke="#173a35" strokeWidth="1.5"/>
+              <path d="M12 19C15.866 19 19 15.866 19 12C19 8.13401 15.866 5 12 5C8.13401 5 5 8.13401 5 12C5 15.866 8.13401 19 12 19Z" stroke="#173a35" strokeWidth="1.5" strokeDasharray="1 3"/>
+              <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" stroke="#173a35" strokeWidth="1.5"/>
+              <path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" stroke="#173a35" strokeWidth="1.5"/>
             </svg>
-            Start Bot
-          </button>
-          <button
-            className="btn btn-error flex-1"
-            onClick={stopBot}
-            disabled={!botRunning}
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
-            </svg>
-            Stop Bot
-          </button>
-        </div>
-
-        {/* Settings Button */}
-        <button
-          className="btn btn-outline btn-block"
-          onClick={openOptionsPage}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-          </svg>
-          Settings & Configuration
-        </button>
-
-        {/* Feedback Message */}
-        {feedback && (
-          <div className={`alert ${feedback.includes('success') || feedback.includes('🚀') ? 'alert-success' : 'alert-error'} shadow-lg`}>
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="stroke-current flex-shrink-0 w-6 h-6">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-            </svg>
-            <span className="text-sm">{feedback}</span>
+            <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>Controls</span>
           </div>
-        )}
 
-        {/* Activity Log */}
-        <div className="card bg-base-200 shadow-sm">
-          <div className="card-body p-3">
-            <h3 className="card-title text-sm">Recent Activity</h3>
-            <div className="max-h-32 overflow-y-auto text-xs space-y-1">
-              {botLog.length === 0 ? (
-                <p className="text-base-content/60 italic">No activity yet</p>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" }}>
+            <div>
+              <label style={{ fontSize: "9px", color: "#6c757d", display: "block", marginBottom: "3px" }}>Target chats</label>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={nChats}
+                onChange={(e) => setNChats(Number(e.target.value))}
+                disabled={running}
+                style={{
+                  width: "100%",
+                  padding: "6px",
+                  border: "1px solid #dee2e6",
+                  borderRadius: "5px",
+                  fontSize: "11px",
+                  fontFamily: "monospace",
+                }}
+              />
+            </div>
+
+            <div>
+              <label style={{ fontSize: "9px", color: "#6c757d", display: "block", marginBottom: "3px" }}>
+                {useGroq ? "Groq Model" : "OpenAI Model"}
+              </label>
+              {useGroq ? (
+                <select
+                  value={groqModel}
+                  onChange={(e) => handleGroqModelChange(e.target.value)}
+                  disabled={running}
+                  style={{
+                    width: "100%",
+                    padding: "6px",
+                    border: "1px solid #dee2e6",
+                    borderRadius: "5px",
+                    fontSize: "10px",
+                    background: "white",
+                  }}
+                >
+                  <option value="openai/gpt-oss-120b">🧠 GPT-OSS 120B</option>
+                  <option value="llama-3.3-70b-versatile">⚡ Llama 3.3 70B</option>
+                  <option value="meta-llama/llama-4-scout-17b-16e-instruct">🚀 Llama 4 Scout</option>
+                  <option value="meta-llama/llama-4-maverick-17b-128e-instruct">⚖️ Llama 4 Maverick</option>
+                  <option value="moonshotai/kimi-k2-instruct-0905">📚 Kimi K2</option>
+                  <option value="qwen/qwen3-32b">💰 Qwen 3 32B</option>
+                </select>
               ) : (
-                botLog.slice(0, 5).map((entry, i) => (
-                  <div key={i} className="flex gap-2 items-start">
-                    <span className="text-base-content/60 whitespace-nowrap">
-                      {new Date(entry.time).toLocaleTimeString()}
-                    </span>
-                    <span className="badge badge-xs badge-ghost">{entry.type}</span>
-                  </div>
-                ))
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  disabled={running}
+                  style={{
+                    width: "100%",
+                    padding: "6px",
+                    border: "1px solid #dee2e6",
+                    borderRadius: "5px",
+                    fontSize: "11px",
+                    background: "white",
+                  }}
+                >
+                  <option value="gpt-4o-mini">GPT-4o mini</option>
+                  <option value="gpt-4o">GPT-4o</option>
+                </select>
               )}
             </div>
           </div>
+
+          {/* ✅ USE GROQ TOGGLE - COMPACT */}
+          <label
+            onClick={() => !running && handleUseGroqChange(!useGroq)}
+            style={{
+              background: "#f8f9fa",
+              padding: "8px 10px",
+              borderRadius: "6px",
+              marginBottom: "6px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              cursor: running ? "not-allowed" : "pointer",
+              opacity: running ? 0.6 : 1,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: "10px", fontWeight: "500", color: "#173a35" }}>Use Groq</div>
+              <div style={{ fontSize: "7.5px", color: "#6c757d" }}>
+                {useGroq ? "Blazing fast (Groq API)" : "Using OpenAI"}
+              </div>
+            </div>
+            
+            <div
+              style={{
+                width: "38px",
+                height: "20px",
+                background: useGroq ? "#008585" : "#dee2e6",
+                borderRadius: "10px",
+                position: "relative",
+                transition: "background 0.2s",
+              }}
+            >
+              <div
+                style={{
+                  width: "16px",
+                  height: "16px",
+                  background: "white",
+                  borderRadius: "50%",
+                  position: "absolute",
+                  top: "2px",
+                  left: useGroq ? "20px" : "2px",
+                  transition: "left 0.2s",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                }}
+              />
+            </div>
+          </label>
+
+          {/* ✅ STRICT HOURS TOGGLE - COMPACT */}
+          <label
+            onClick={() => !running && handleStrictHoursChange(!strictHours)}
+            style={{
+              background: "#f8f9fa",
+              padding: "8px 10px",
+              borderRadius: "6px",
+              marginBottom: "8px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              cursor: running ? "not-allowed" : "pointer",
+              opacity: running ? 0.6 : 1,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: "10px", fontWeight: "500", color: "#173a35" }}>Strict hours</div>
+              <div style={{ fontSize: "7.5px", color: "#6c757d" }}>
+                {strictHours ? "9 AM - 6 PM only" : "Runs 24/7"}
+              </div>
+            </div>
+            
+            <div
+              style={{
+                width: "38px",
+                height: "20px",
+                background: strictHours ? "#008585" : "#dee2e6",
+                borderRadius: "10px",
+                position: "relative",
+                transition: "background 0.2s",
+              }}
+            >
+              <div
+                style={{
+                  width: "16px",
+                  height: "16px",
+                  background: "white",
+                  borderRadius: "50%",
+                  position: "absolute",
+                  top: "2px",
+                  left: strictHours ? "20px" : "2px",
+                  transition: "left 0.2s",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                }}
+              />
+            </div>
+          </label>
+
+          <div style={{ display: "flex", gap: "6px" }}>
+            <button
+              onClick={openOptionsPage}
+              style={{
+                flex: 1,
+                padding: "8px",
+                background: "#e5c185",
+                border: "none",
+                borderRadius: "6px",
+                fontSize: "11px",
+                fontWeight: "500",
+                color: "#173a35",
+                cursor: "pointer",
+              }}
+            >
+              Settings
+            </button>
+
+            <button
+              onClick={handleStart}
+              disabled={running || !!errorMsg}
+              style={{
+                flex: 1,
+                padding: "8px",
+                background: running || errorMsg ? "#dee2e6" : "#008585",
+                border: "none",
+                borderRadius: "6px",
+                fontSize: "11px",
+                fontWeight: "500",
+                color: "white",
+                cursor: running || errorMsg ? "not-allowed" : "pointer",
+              }}
+            >
+              ▶ Start
+            </button>
+
+            <button
+              onClick={handleStop}
+              disabled={!running}
+              style={{
+                flex: 1,
+                padding: "8px",
+                background: !running ? "#dee2e6" : "#c7522a",
+                border: "none",
+                borderRadius: "6px",
+                fontSize: "11px",
+                fontWeight: "500",
+                color: "white",
+                cursor: !running ? "not-allowed" : "pointer",
+              }}
+            >
+              ■ Stop
+            </button>
+          </div>
+        </div>
+
+        {/* TERMINAL - Expanded and Taller */}
+        <div style={{ background: "#1a1f1e", borderRadius: "10px", overflow: "hidden", border: "1px solid #2a2f2e", flex: 1, display: "flex", flexDirection: "column" }}>
+          <div
+            style={{
+              padding: "8px 12px",
+              borderBottom: "1px solid rgba(255,255,255,0.1)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path fillRule="evenodd" clipRule="evenodd" d="M12 1.25C6.06294 1.25 1.25 6.06294 1.25 12C1.25 13.8563 1.72113 15.6046 2.55076 17.1298L1.76267 21.3627C1.71742 21.6058 1.79485 21.8555 1.96967 22.0303C2.14448 22.2051 2.39422 22.2826 2.63727 22.2373L6.87016 21.4493C8.39536 22.2788 10.1437 22.75 12 22.75C17.937 22.75 22.75 17.937 22.75 12C22.75 6.06293 17.937 1.25 12 1.25ZM17 10.75C16.3097 10.75 15.75 11.3097 15.75 12C15.75 12.6903 16.3097 13.25 17 13.25C17.6903 13.25 18.25 12.6903 18.25 12C18.25 11.3097 17.6903 10.75 17 10.75ZM10.75 12C10.75 11.3097 11.3097 10.75 12 10.75C12.6903 10.75 13.25 11.3097 13.25 12C13.25 12.6903 12.6903 13.25 12 13.25C11.3097 13.25 10.75 12.6903 10.75 12ZM7 10.75C6.30961 10.75 5.75 11.3097 5.75 12C5.75 12.6903 6.30961 13.25 7 13.25C7.69039 13.25 8.25 12.6903 8.25 12C8.25 11.3097 7.69039 10.75 7 10.75Z" fill="#74a892"/>
+              </svg>
+              <span style={{ fontSize: "10px", color: "#74a892", fontWeight: "600" }}>Live terminal</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <button
+                onClick={handleCopyLogs}
+                disabled={logs.length === 0}
+                style={{
+                  padding: "4px 8px",
+                  background: copied ? "#74a892" : "rgba(255,255,255,0.1)",
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  borderRadius: "4px",
+                  fontSize: "9px",
+                  color: "#fbf2c4",
+                  cursor: logs.length === 0 ? "not-allowed" : "pointer",
+                  opacity: logs.length === 0 ? 0.5 : 1,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "4px",
+                }}
+              >
+                {copied ? (
+                  <>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M5 13l4 4L19 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    Copied
+                  </>
+                ) : (
+                  <>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" strokeWidth="2"/>
+                      <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" stroke="currentColor" strokeWidth="2"/>
+                    </svg>
+                    Copy
+                  </>
+                )}
+              </button>
+              <div style={{ fontSize: "8px", color: "#6c757d" }}>{logs.length} events</div>
+            </div>
+          </div>
+
+          <div
+            className="log-container"
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: "10px",
+              fontFamily: "monospace",
+              fontSize: "10px",
+              lineHeight: "1.5",
+              color: "#fbf2c4",
+            }}
+          >
+            {logs.length === 0 && <div style={{ opacity: 0.5, fontStyle: "italic" }}>Ready.</div>}
+            {logs.map((log, i) => (
+              <div key={i} style={{ display: "flex", gap: "8px", marginBottom: "3px" }}>
+                <span style={{ opacity: 0.6, minWidth: "65px" }}>
+                  {new Date(log.time).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                </span>
+                <span
+                  style={{
+                    opacity: 0.8,
+                    minWidth: "50px",
+                    color: log.actor === "Bot" ? "#74a892" : log.actor === "User" ? "#e5c185" : "#fbf2c4",
+                  }}
+                >
+                  {log.actor}
+                </span>
+                <span style={{ opacity: log.type === "ERROR" ? 1 : 0.9, color: log.type === "ERROR" ? "#c7522a" : "inherit" }}>
+                  {log.message}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ textAlign: "center", fontSize: "8px", color: "#6c757d", marginTop: "2px" }}>
+          v2.4.0 • linkedIn autoresponder
         </div>
       </div>
     </div>

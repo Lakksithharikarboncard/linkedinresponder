@@ -1,15 +1,39 @@
+@import url("https://fonts.googleapis.com/css2?family=Alata&display=swap");
 @import "tailwindcss";
-@plugin "daisyui";
 
-body {
+* {
   margin: 0;
   padding: 0;
-  width: 380px;
-  min-height: 500px;
-  font-family: system-ui, -apple-system, sans-serif;
+  box-sizing: border-box;
 }
 
+html,
+body,
 #popup-root {
-  width: 100%;
-  height: 100%;
+  width: 450px;
+  height: 600px;
+  overflow: hidden;
+  font-family: "Alata", sans-serif;
+}
+
+body {
+  background: linear-gradient(135deg, #fbf2c4 0%, #e5c185 100%);
+}
+
+/* Custom scrollbar */
+.log-container::-webkit-scrollbar {
+  width: 5px;
+}
+
+.log-container::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.log-container::-webkit-scrollbar-thumb {
+  background: #74a892;
+  border-radius: 10px;
+}
+
+.log-container::-webkit-scrollbar-thumb:hover {
+  background: #008585;
 }

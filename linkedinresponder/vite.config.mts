@@ -8,11 +8,14 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// ✅ CHANGE THIS VARIABLE TO RENAME YOUR BUILD FOLDER
+const BUILD_DIR = "dist-v1"; 
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
-    outDir: "dist",
-    emptyOutDir: true,
+    outDir: BUILD_DIR, // ✅ Uses your custom name
+    emptyOutDir: true, // Clears the folder before building
     rollupOptions: {
       input: {
         popup: resolve(__dirname, "popup.html"),

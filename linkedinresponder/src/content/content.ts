@@ -1,4 +1,4 @@
-import { BotCommand, BotLogEntry } from "../shared/types";
+import { BotCommand, BotLogEntry, BotStats, BotStatus } from "../shared/types";
 import { checkPositiveLead, sendLeadAlertEmail, shouldReplyToConversation } from "../shared/sendEmail";
 
 // Extend BotCommand to include ping and unread check
@@ -7,39 +7,61 @@ type ContentCommand =
   | { type: "PING_TEST" }
   | { type: "CHECK_UNREAD" };
 
+// --- STATE VARIABLES ---
 let botRunning = false;
 let botLoopTimeout: number | null = null;
+let stats: BotStats = { chatsProcessed: 0, repliesSent: 0, leadsFound: 0, startTime: null, tokensUsed: 0, currentModel: "" };
+let logs: BotLogEntry[] = [];
+let useStrictHours = true;
+let useGroq = false;
+let groqModel = "llama-3.3-70b-versatile";
 
-function getErrorMsg(err: unknown): string {
-  if (typeof err === "string") return err;
-  if (err && typeof err === "object" && "message" in err) return (err as any).message;
-  return "Unknown error";
+// --- LOGGING & STATS HELPERS ---
+function addLog(type: "INFO" | "ACTION" | "ERROR" | "SUCCESS" | "WARNING", message: string, actor: "User" | "Bot" | "System") {
+  const entry: BotLogEntry = { time: Date.now(), type, message, actor };
+  logs.unshift(entry);
+  if (logs.length > 100) logs.pop();
+  chrome.storage.local.set({ botLog: logs.slice(0, 50) });
 }
 
-function logAction(type: string, detail?: any) {
-  chrome.storage.local.get(["botLog"], (res) => {
-    const log: BotLogEntry[] = res.botLog || [];
-    log.unshift({ time: Date.now(), type, detail });
-    chrome.storage.local.set({ botLog: log.slice(0, 50) });
-  });
+function updateStats(key: keyof BotStats, value: number | string) {
+  if (key === 'startTime') {
+      stats.startTime = value as number;
+  } else if (key === 'tokensUsed') {
+      stats.tokensUsed = value as number;
+  } else if (key === 'currentModel') {
+      stats.currentModel = value as string;
+  } else {
+      (stats[key] as number) += value as number;
+  }
 }
 
+// --- UTILS ---
 function delay(ms: number) {
   return new Promise<void>((res) => setTimeout(res, ms));
 }
 
-function randomDelay(min: number, max: number) {
-  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
-  return delay(ms);
+function calculateTypingDelay(text: string): number {
+  const words = text.split(" ").length;
+  const baseDelay = 2000; 
+  const msPerWord = 300;  
+  return baseDelay + (words * msPerWord) + (Math.random() * 2000);
+}
+
+function isWithinWorkingHours(startHour: number = 9, endHour: number = 18): boolean {
+  const currentHour = new Date().getHours();
+  return currentHour >= startHour && currentHour < endHour;
 }
 
 async function humanType(input: HTMLElement, text: string) {
   input.focus();
   document.execCommand("selectAll", false, "");
   document.execCommand("delete", false, "");
+  
   for (const char of text) {
     document.execCommand("insertText", false, char);
-    await delay(50 + Math.random() * 150);
+    const charDelay = Math.random() > 0.9 ? 150 : 30 + Math.random() * 50; 
+    await delay(charDelay);
   }
 }
 
@@ -55,23 +77,19 @@ async function humanScroll() {
 
 async function scrollConversationList(times: number = 5) {
   const container = document.querySelector<HTMLElement>('.msg-conversations-container--inbox-shortcuts');
-  if (!container) {
-    console.warn("Conversation container not found");
-    return;
-  }
+  if (!container) return;
 
   for (let i = 0; i < times; i++) {
-    const scrollDown = Math.random() * 200 + 100;
-    container.scrollBy({ top: scrollDown, behavior: 'smooth' });
+    container.scrollBy({ top: Math.random() * 200 + 100, behavior: 'smooth' });
     await delay(500 + Math.random() * 800);
-    const scrollUp = Math.random() * 50;
-    container.scrollBy({ top: -scrollUp, behavior: 'smooth' });
+    container.scrollBy({ top: -(Math.random() * 50), behavior: 'smooth' });
     await delay(400 + Math.random() * 500);
   }
 }
 
 async function getSettings(): Promise<{
   apiKey: string;
+  groqApiKey: string;
   chatMin: number;
   chatMax: number;
   loopMin: number;
@@ -79,11 +97,14 @@ async function getSettings(): Promise<{
   prompt: string;
   leadPrompt: string;
   targetEmail: string;
+  startHour: number;
+  endHour: number;
 }> {
   return new Promise((resolve) => {
     chrome.storage.local.get(
       [
         "openaiApiKey",
+        "groqApiKey",
         "chatMinDelay",
         "chatMaxDelay",
         "loopMinDelay",
@@ -91,17 +112,22 @@ async function getSettings(): Promise<{
         "replyPrompt",
         "leadPrompt",
         "targetEmail",
+        "startHour",
+        "endHour"
       ],
       (res) =>
         resolve({
           apiKey: res.openaiApiKey,
+          groqApiKey: res.groqApiKey || "",
           chatMin: res.chatMinDelay || 1000,
           chatMax: res.chatMaxDelay || 2500,
           loopMin: res.loopMinDelay || 3000,
           loopMax: res.loopMaxDelay || 6000,
-          prompt: res.replyPrompt || "Reply briefly and professionally to this LinkedIn message:",
-          leadPrompt: res.leadPrompt || "Does the user seem interested or did they share contact details?",
+          prompt: res.replyPrompt || "Reply briefly:",
+          leadPrompt: res.leadPrompt || "Interested lead",
           targetEmail: res.targetEmail || "",
+          startHour: res.startHour || 9,
+          endHour: res.endHour || 18,
         })
     );
   });
@@ -134,7 +160,6 @@ function getLastMessage(leadName: string): { fromLead: boolean; content: string 
   return null;
 }
 
-// ✅ Enhanced: Get structured conversation with speaker labels
 function getStructuredConversation(): Array<{ speaker: string; message: string }> {
   const events = Array.from(document.querySelectorAll("li.msg-s-message-list__event"));
   const conversation: Array<{ speaker: string; message: string }> = [];
@@ -142,231 +167,229 @@ function getStructuredConversation(): Array<{ speaker: string; message: string }
   for (const msgEl of events) {
     const senderEl = msgEl.querySelector("span.msg-s-message-group__name");
     const contentEl = msgEl.querySelector("p.msg-s-event-listitem__body");
-    
     if (senderEl && contentEl) {
-      const speaker = senderEl.textContent?.trim() || "Unknown";
-      const message = contentEl.textContent?.trim() || "";
-      
-      if (message) {
-        conversation.push({ speaker, message });
-      }
+      conversation.push({ 
+          speaker: senderEl.textContent?.trim() || "Unknown", 
+          message: contentEl.textContent?.trim() || "" 
+      });
     }
   }
-
   return conversation;
 }
 
-function getFullChat(): string {
-  const ul = document.querySelector("ul.msg-s-message-list-content");
-  if (!ul) return "";
-  return Array.from(ul.children)
-    .map((li) => li.textContent?.replace(/\s+/g, " ").trim() || "")
-    .filter(Boolean)
-    .join("\n");
-}
-
-// ✅ UPGRADED: More natural, context-aware AI reply generation
-async function fetchReply(
-  apiKey: string,
-  prompt: string,
-  conversation: Array<{ speaker: string; message: string }>,
-  leadName: string,
-  myName: string = "You"
-): Promise<string> {
-  
-  // Build conversation history for better context
-  const conversationText = conversation
-    .map(msg => `${msg.speaker}: ${msg.message}`)
-    .join("\n");
-
-  // Enhanced system prompt for more human-like responses
-  const enhancedSystemPrompt = `You are a professional LinkedIn user having a natural conversation. 
-
-IMPORTANT RULES:
-- Write like a real person, not a formal AI assistant
-- Keep responses brief (1-3 sentences max)
-- Match the tone and formality of the conversation
-- Use casual language when appropriate (e.g., "sounds great!", "happy to help")
-- Avoid corporate jargon and robotic phrases like "I hope this message finds you well"
-- Don't use excessive emojis unless the other person does
-- Reference specific details from the conversation to show you're paying attention
-- Ask follow-up questions when natural
-- Use contractions (I'm, you're, that's) to sound more natural
-
-Current conversation context:
+// ✅ UPDATED: Track tokens and add model name
+async function fetchReply(apiKey: string, prompt: string, conversation: any[], leadName: string, myName: string, useGroqAPI: boolean = false, groqModelName: string = "llama-3.3-70b-versatile"): Promise<{ reply: string; tokensUsed: number }> {
+  const conversationText = conversation.map(msg => `${msg.speaker}: ${msg.message}`).join("\n");
+  const systemPrompt = `You are a professional LinkedIn user. Write like a human (brief, casual).
+Context:
 ${conversationText}
-
 ${prompt.replace("{extracted_text}", conversationText).replace("{user_name}", leadName)}
+Respond as ${myName}.`;
 
-Respond as ${myName} in a natural, conversational way.`;
+  // ✅ Choose API endpoint based on provider
+  const apiUrl = useGroqAPI 
+    ? "https://api.groq.com/openai/v1/chat/completions"
+    : "https://api.openai.com/v1/chat/completions";
 
-  // Use conversation history as messages for better context
-  const messages = [
-    { role: "system", content: enhancedSystemPrompt },
-    ...conversation.slice(-10).map(msg => ({
-      role: msg.speaker === leadName ? "user" : "assistant",
-      content: msg.message
-    }))
-  ];
+  const model = useGroqAPI ? groqModelName : "gpt-4o-mini";
 
-  const body = {
-    model: "gpt-4o-mini", // ✅ CHANGED: Much cheaper and faster!
-    messages: messages,
-    max_tokens: 150, // ✅ Shorter for more concise replies
-    temperature: 0.7, // ✅ Higher for more natural variation
-    presence_penalty: 0.6, // ✅ Reduces repetition
-    frequency_penalty: 0.3, // ✅ Encourages variety
-  };
-
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { 
-      Authorization: `Bearer ${apiKey}`, 
-      "Content-Type": "application/json" 
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+  // ✅ FIXED: Dynamic max_tokens based on model
+  let maxTokens = 150;
+  if (useGroqAPI) {
+    if (groqModelName === "openai/gpt-oss-120b") {
+      maxTokens = 500;  // More tokens for verbose GPT-OSS
+    } else if (groqModelName === "moonshotai/kimi-k2-instruct-0905") {
+      maxTokens = 250;  // Medium for Kimi K2
+    } else {
+      maxTokens = 250;  // Default for Llama 3.3 and others
+    }
   }
 
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: model,
+      messages: [
+          { role: "system", content: systemPrompt },
+          ...conversation.slice(-20).map(msg => ({
+              role: msg.speaker === leadName ? "user" : "assistant",
+              content: msg.message
+          }))
+      ],
+      max_tokens: maxTokens,
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) throw new Error(`${useGroqAPI ? "Groq" : "OpenAI"} API Error`);
   const data = await response.json();
-  return data.choices[0].message.content.trim();
+  
+  // ✅ NEW: Calculate total tokens used
+  const tokensUsed = (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0);
+  
+  return { 
+    reply: data.choices[0].message.content.trim(),
+    tokensUsed 
+  };
 }
 
-function cleanChat(chat: string): string {
-  return chat
-    .split('\n')
-    .map(line =>
-      line
-        .replace(/([\u2700-\u27BF]|[\uE000-\uF8FF]|[\uD83C-\uDBFF\uDC00-\uDFFF]|[\u2600-\u26FF])/g, '')
-        .replace(/\s+/g, ' ')
-        .trim()
-    )
-    .filter(line => line.length > 0)
-    .join('\n');
-}
-
-// ✅ Get current user's name from LinkedIn
 function getMyName(): string {
-  const profileBtn = document.querySelector('.global-nav__me-photo') as HTMLElement;
   const nameEl = document.querySelector('.global-nav__me-content span') as HTMLElement;
   return nameEl?.textContent?.trim() || "You";
 }
 
+// ✅ UPDATED: Get model display name
+function getModelDisplayName(modelId: string): string {
+  const modelNames: Record<string, string> = {
+    "openai/gpt-oss-120b": "GPT-OSS-120B",
+    "llama-3.3-70b-versatile": "Llama-3.3-70B",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "Llama-4-Scout",
+    "meta-llama/llama-4-maverick-17b-128e-instruct": "Llama-4-Maverick",
+    "moonshotai/kimi-k2-instruct-0905": "Kimi-K2",
+    "qwen/qwen3-32b": "Qwen-3-32B",
+    "gpt-4o-mini": "GPT-4o-mini",
+    "gpt-4o": "GPT-4o",
+  };
+  return modelNames[modelId] || modelId;
+}
+
+// --- MAIN LOOP ---
 async function runIteration(n: number) {
-  const N = n - 1;
-  logAction("started", { N });
-  const { apiKey, chatMin, chatMax, loopMin, loopMax, prompt, leadPrompt, targetEmail } = await getSettings();
-  const myName = getMyName();
+  addLog("INFO", `Starting batch of ${n} chats...`, "System");
   
+  const { apiKey, groqApiKey, chatMin, chatMax, loopMin, loopMax, prompt, leadPrompt, targetEmail, startHour, endHour } = await getSettings();
+  
+  // ✅ Determine which API key to use
+  const activeApiKey = useGroq ? groqApiKey : apiKey;
+  
+  // ✅ Update current model in stats
+  const currentModelName = useGroq ? groqModel : "gpt-4o-mini";
+  updateStats("currentModel", getModelDisplayName(currentModelName));
+  
+  // ✅ CHECK: Strict Mode Working Hours
+  if (useStrictHours && !isWithinWorkingHours(startHour, endHour)) {
+    addLog("WARNING", `Outside working hours (${startHour}-${endHour}). Pausing.`, "System");
+    if (botRunning) {
+      botLoopTimeout = window.setTimeout(() => runIteration(n), 15 * 60 * 1000);
+    }
+    return;
+  }
+
+  const myName = getMyName();
   await scrollConversationList(5);
+  
   let chats = Array.from(document.querySelectorAll("ul.msg-conversations-container__conversations-list li"))
     .slice(0, n)
     .sort(() => Math.random() - 0.2);
   
-  await humanScroll();
-  await scrollConversationList(11);
-  
+  addLog("INFO", `Found ${chats.length} conversations to check.`, "Bot");
+
   for (let i = 0; i < chats.length && botRunning; i++) {
+    // Scroll & Click
     await humanScroll();
-    await scrollConversationList(11);
     await randomDelay(chatMin, chatMax);
-    
     const clickable = chats[i].querySelector<HTMLElement>("a, .msg-conversation-listitem__link, [tabindex='0']");
     clickable?.click();
-    await randomDelay(1500, 2500);
+    
+    // Wait for load
+    await delay(2000); 
 
     const leadName = getLeadName();
-    if (!leadName) {
-      logAction("skipped", { reason: "No lead name found" });
-      continue;
-    }
+    if (!leadName) continue;
+
+    addLog("INFO", `Checking chat with ${leadName}...`, "Bot");
+    updateStats("chatsProcessed", 1);
 
     const lastMsg = getLastMessage(leadName);
     if (!lastMsg || !lastMsg.fromLead) {
-      logAction("skipped", { lead: leadName, reason: "No new message from lead" });
-      continue;
+        addLog("INFO", `Skipping ${leadName}: Last message was from me.`, "Bot");
+        continue;
     }
 
-    // ✅ Get structured conversation
     const structuredConvo = getStructuredConversation();
-    if (structuredConvo.length === 0) {
-      logAction("skipped", { lead: leadName, reason: "Empty conversation" });
-      continue;
-    }
+    if (structuredConvo.length === 0) continue;
 
-    // ✅ NEW: AI decides if we should reply
-    let decision: { shouldReply: boolean; reason: string };
+    // AI Decision
+    let decision;
     try {
-      decision = await shouldReplyToConversation(apiKey, structuredConvo, leadName);
-      logAction("ai_decision", { 
-        lead: leadName, 
-        decision: decision.shouldReply ? "REPLY" : "SKIP", 
-        reason: decision.reason 
-      });
+      decision = await shouldReplyToConversation(activeApiKey, structuredConvo, leadName);
+      addLog("ACTION", `AI Decision for ${leadName}: ${decision.shouldReply ? "REPLY" : "SKIP"} (${decision.reason})`, "Bot");
     } catch (e) {
-      logAction("error", { lead: leadName, error: "AI decision failed: " + getErrorMsg(e) });
+      addLog("ERROR", `AI Decision Failed: ${getErrorMsg(e)}`, "System");
       continue;
     }
 
-    // ✅ If AI says SKIP, don't reply
-    if (!decision.shouldReply) {
-      logAction("skipped_by_ai", { lead: leadName, reason: decision.reason });
-      continue;
-    }
+    if (!decision.shouldReply) continue;
 
-    // ✅ Lead check with recent messages (only if we're going to reply)
-    const fullChat = getFullChat();
-    const events = Array.from(document.querySelectorAll("li.msg-s-message-list__event"));
-    const recentMsgs = events
-      .reverse()
-      .map((el) => el.textContent?.trim())
-      .filter(Boolean)
-      .slice(0, 2) as string[];
-
-    if (recentMsgs.length === 2 && targetEmail) {
-      try {
-        const isPositive = await checkPositiveLead(apiKey, leadPrompt, recentMsgs);
-        if (isPositive) {
-          const cleanedChat = cleanChat(fullChat);
-          await sendLeadAlertEmail(leadName, cleanedChat, targetEmail);
-          logAction("positive_lead_email_sent", { lead: leadName });
+    // Lead Alert Logic
+    if (targetEmail) {
+        try {
+            const recentMsgs = structuredConvo.slice(-2).map(m => m.message);
+            const isPositive = await checkPositiveLead(activeApiKey, leadPrompt, recentMsgs);
+            if (isPositive) {
+                const fullChat = structuredConvo.map(m => `${m.speaker}: ${m.message}`).join("\n");
+                await sendLeadAlertEmail(leadName, fullChat, targetEmail);
+                updateStats("leadsFound", 1);
+                addLog("SUCCESS", `HOT LEAD FOUND: ${leadName}. Email sent!`, "Bot");
+            }
+        } catch (e) {
+            addLog("ERROR", `Lead check failed: ${getErrorMsg(e)}`, "System");
         }
-      } catch (e) {
-        logAction("positive_lead_email_failed", { lead: leadName, error: getErrorMsg(e) });
-      }
     }
 
-    // ✅ Generate reply (only if AI approved)
-    let reply: string;
+    // Generate Reply
+    let replyData: { reply: string; tokensUsed: number };
     try {
-      reply = await fetchReply(apiKey, prompt, structuredConvo, leadName, myName);
+      replyData = await fetchReply(activeApiKey, prompt, structuredConvo, leadName, myName, useGroq, groqModel);
+      
+      // ✅ NEW: Update token counter
+      updateStats("tokensUsed", stats.tokensUsed + replyData.tokensUsed);
+      
     } catch (e) {
-      logAction("error", { lead: leadName, error: "Reply generation failed: " + getErrorMsg(e) });
+      addLog("ERROR", `Reply Generation Failed: ${getErrorMsg(e)}`, "System");
       continue;
     }
 
-    // ✅ Send the reply
+    // Send Reply
     const input = document.querySelector<HTMLElement>("div.msg-form__contenteditable[role='textbox']");
     const sendBtn = document.querySelector<HTMLButtonElement>("button.msg-form__send-button");
     
     if (input && sendBtn) {
-      await humanType(input, reply);
-      await delay(500 + Math.random() * 1000);
-      sendBtn.click();
-      logAction("replied", { lead: leadName, reply, ai_reason: decision.reason });
+      const typingDelay = calculateTypingDelay(replyData.reply);
+      addLog("ACTION", `Typing reply to ${leadName} (waiting ${Math.round(typingDelay/1000)}s)...`, "Bot");
+      await delay(typingDelay);
+
+      await humanType(input, replyData.reply);
+      await delay(800);
+      
+      // ✅ FIXED: Check if send button is enabled before clicking
+      const isDisabled = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
+      if (isDisabled) {
+        addLog("ERROR", `Send button disabled for ${leadName} - message might be empty or invalid`, "System");
+      } else {
+        sendBtn.click();
+        await delay(500);  // Wait for UI to update
+        
+        // ✅ FIXED: Verify message was sent (input should be cleared)
+        const inputText = input.textContent?.trim() || "";
+        if (inputText.length > 0) {
+          addLog("WARNING", `Message may not have sent to ${leadName} - input not cleared`, "System");
+        } else {
+          updateStats("repliesSent", 1);
+          // ✅ NEW: Show model name in success log
+          addLog("SUCCESS", `Sent reply to ${leadName} (${getModelDisplayName(currentModelName)})`, "Bot");
+        }
+      }
     } else {
-      logAction("error", { lead: leadName, error: "Send UI not found" });
+        addLog("ERROR", "Could not find chat input box", "System");
     }
 
     await randomDelay(chatMin, chatMax);
-    if (i > 0 && i % 5 === 0) await humanScroll();
   }
 
-  logAction("finished iteration");
+  addLog("INFO", "Batch finished. Sleeping...", "System");
+  
   if (botRunning) {
     botLoopTimeout = window.setTimeout(
       () => runIteration(n), 
@@ -375,40 +398,52 @@ async function runIteration(n: number) {
   }
 }
 
+function randomDelay(min: number, max: number) {
+    return delay(Math.floor(Math.random() * (max - min + 1)) + min);
+}
+
+function getErrorMsg(err: unknown): string {
+    if (typeof err === "string") return err;
+    if (err && typeof err === "object" && "message" in err) return (err as any).message;
+    return "Unknown error";
+}
+
+// --- MESSAGE LISTENER ---
 chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse) => {
-  switch (msg.type) {
-    case "PING_TEST":
-      sendResponse("✅ Content script active!");
+  if (msg.type === "PING_TEST") { 
+      sendResponse("✅ Content script active!"); 
+      return; 
+  }
+  
+  if (msg.type === "GET_STATUS") {
+      const status: BotStatus = { running: botRunning, stats, logs };
+      sendResponse(status);
       return;
-    case "START_BOT":
-      if (!botRunning) {
+  }
+
+  if (msg.type === "START_BOT") {
+    if (!botRunning) {
         botRunning = true;
-        runIteration(msg.n!);
+        stats.startTime = Date.now();
+        stats.tokensUsed = 0;  // ✅ Reset token counter on start
+        useStrictHours = msg.config?.strictHours ?? true;
+        useGroq = msg.config?.useGroq ?? false;
+        groqModel = msg.config?.groqModel ?? "llama-3.3-70b-versatile";
+        
+        addLog("INFO", `Bot started (Provider: ${useGroq ? 'Groq' : 'OpenAI'}, Strict Hours: ${useStrictHours ? 'ON' : 'OFF'})`, "User");
+        runIteration(msg.config?.nChats ?? 10);
         sendResponse({ status: "ok" });
-      } else {
-        sendResponse({ status: "error", error: "Bot already running" });
-      }
-      return;
-    case "STOP_BOT":
-      botRunning = false;
-      if (botLoopTimeout !== null) clearTimeout(botLoopTimeout);
-      logAction("stopped");
-      sendResponse({ status: "stopped" });
-      return;
-    case "CHECK_UNREAD": {
-      const leadName = getLeadName();
-      const lastMsg = leadName ? getLastMessage(leadName) : null;
-      if (leadName && lastMsg?.fromLead) {
-        chrome.runtime.sendMessage({ 
-          type: "NEW_MESSAGE", 
-          payload: { chatId: leadName, messageText: lastMsg.content } 
-        });
-      }
-      sendResponse({ status: "checked" });
-      return;
+    } else {
+        sendResponse({ status: "error", error: "Already running" });
     }
-    default:
-      sendResponse({ status: "error", error: "Unknown command" });
-      return;
+    return;
+  }
+
+  if (msg.type === "STOP_BOT") {
+    botRunning = false;
+    if (botLoopTimeout !== null) clearTimeout(botLoopTimeout);
+    addLog("INFO", "Bot stopped by user", "User");
+    sendResponse({ status: "stopped" });
+    return;
   }
 });

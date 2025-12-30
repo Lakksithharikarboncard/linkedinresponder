@@ -1,45 +1,138 @@
-// ✅ NEW: AI decides if reply is needed
+// ✅ UPDATED: Smart skip logic with rule-based decision making
 export async function shouldReplyToConversation(
   apiKey: string,
   conversation: Array<{ speaker: string; message: string }>,
   leadName: string
 ): Promise<{ shouldReply: boolean; reason: string }> {
   
+  if (conversation.length === 0) {
+    return { shouldReply: false, reason: "Empty conversation" };
+  }
+
+  const lastMessage = conversation[conversation.length - 1];
+  const lastMessageText = lastMessage.message.toLowerCase();
+  
+  // Get all messages from the bot (not the lead)
+  const myMessages = conversation.filter(msg => msg.speaker !== leadName);
+  const theirMessages = conversation.filter(msg => msg.speaker === leadName);
+
+  // ✅ RULE 1: Never skip if they just answered YOUR question
+  if (myMessages.length > 0) {
+    const myLastMessage = myMessages[myMessages.length - 1];
+    const myLastWasQuestion = myLastMessage.message.includes('?');
+    const theirLastIsAnswer = theirMessages[theirMessages.length - 1] === lastMessage;
+    
+    // Check if my last message was a question and they just responded
+    const myLastIndex = conversation.findIndex(msg => msg === myLastMessage);
+    const theirLastIndex = conversation.length - 1;
+    
+    if (myLastWasQuestion && theirLastIsAnswer && theirLastIndex > myLastIndex) {
+      return {
+        shouldReply: true,
+        reason: "They answered my question - must acknowledge and continue"
+      };
+    }
+  }
+
+  // ✅ RULE 2: Never skip on short answers if conversation is active
+  const isShortAnswer = lastMessage.message.split(' ').length < 20;
+  const hasRecentExchange = myMessages.length > 0 && theirMessages.length > 0;
+  
+  if (isShortAnswer && hasRecentExchange && myMessages.length >= 2) {
+    // Short answer in an active conversation = they're engaged
+    return {
+      shouldReply: true,
+      reason: "Short but engaged response - continuing conversation flow"
+    };
+  }
+
+  // ✅ RULE 3: Only skip on explicit disengagement phrases
+  const disengagementPhrases = [
+    'not interested',
+    'no thanks',
+    'not right now',
+    'too busy right now',
+    'maybe later',
+    'not a fit',
+    'not looking',
+    'thanks but no',
+    'appreciate it but',
+    'not what we need',
+    'have a great day',
+    'talk soon',
+    'take care',
+    'bye',
+    'goodbye',
+    'gotta go',
+    'catch you later'
+  ];
+  
+  const hasDisengagement = disengagementPhrases.some(phrase => 
+    lastMessageText.includes(phrase)
+  );
+  
+  if (hasDisengagement) {
+    return {
+      shouldReply: false,
+      reason: "Lead explicitly disengaged or ended conversation"
+    };
+  }
+
+  // ✅ Check for positive engagement signals
+  const engagementSignals = [
+    'yes', 'yeah', 'sure', 'absolutely', 'definitely',
+    'interested', 'sounds good', 'tell me more',
+    'how does', 'what about', 'can you', 'could you',
+    'would love to', 'want to know', 'curious about',
+    '?'  // Questions are engagement
+  ];
+  
+  const hasEngagement = engagementSignals.some(signal => 
+    lastMessageText.includes(signal)
+  );
+  
+  if (hasEngagement) {
+    return {
+      shouldReply: true,
+      reason: "Positive engagement detected - they're interested"
+    };
+  }
+
+  // ✅ RULE 4: Use AI as fallback for complex cases
+  // Only use AI when rules above don't give a clear answer
   const conversationText = conversation
-    .slice(-8) // Last 8 messages for context
+    .slice(-20)  // Full 20 message context
     .map(msg => `${msg.speaker}: ${msg.message}`)
     .join("\n");
 
-  const decisionPrompt = `You are an AI assistant analyzing LinkedIn conversations to decide if a response is appropriate.
+  const decisionPrompt = `You are analyzing a LinkedIn conversation to decide if a response is needed.
 
-CONVERSATION CONTEXT:
+CONVERSATION (last 20 messages):
 ${conversationText}
 
-ANALYZE and determine if "${leadName}" needs a response based on these rules:
+CONTEXT: The lead just sent: "${lastMessage.message}"
+
+Analyze if you should reply:
 
 REPLY if:
-- They asked a question
-- They shared information expecting feedback
-- Conversation is ongoing and natural to continue
-- They expressed interest in something you mentioned
-- They're waiting for your input or decision
+- They asked a question (even indirectly)
+- They shared useful information expecting feedback
+- They answered YOUR question and conversation should continue
+- They showed interest or curiosity
+- Natural conversation flow requires acknowledgment
 
-DO NOT REPLY if:
-- They said goodbye/thanks and closed conversation (e.g., "thanks, bye!", "talk soon!", "have a great day")
-- They gave a simple acknowledgment (e.g., "ok", "got it", "sounds good")
-- Conversation naturally concluded
-- They didn't ask anything or expect a response
-- Replying would seem pushy or forced
-- They're clearly ending the chat
+SKIP ONLY if:
+- They gave a hard "no" or clear rejection
+- They said goodbye and closed the conversation
+- They gave a pure acknowledgment with no follow-up needed (like "ok thanks")
+- Replying would seem pushy after their closure statement
 
-Respond with ONLY ONE WORD followed by a brief reason:
-Format: REPLY: [reason] OR SKIP: [reason]
+Respond ONLY with this format:
+REPLY: [one sentence reason]
+OR
+SKIP: [one sentence reason]
 
-Example responses:
-- "REPLY: They asked about pricing"
-- "SKIP: They said thanks and goodbye"
-- "REPLY: They want to schedule a call"
-- "SKIP: Conversation naturally ended"`;
+Be biased toward REPLY unless there's clear disengagement.`;
 
   try {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -51,10 +144,18 @@ Example responses:
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: decisionPrompt }],
-        temperature: 0.3,
-        max_tokens: 50,
+        temperature: 0.2,  // Lower temperature for more consistent decisions
+        max_tokens: 60,
       }),
     });
+
+    if (!res.ok) {
+      // If AI fails, default to replying (better to over-engage than miss opportunities)
+      return { 
+        shouldReply: true, 
+        reason: "AI check failed - defaulting to reply" 
+      };
+    }
 
     const data = await res.json();
     const reply = data.choices?.[0]?.message?.content?.trim() || "";
@@ -65,7 +166,11 @@ Example responses:
     return { shouldReply, reason };
   } catch (err) {
     console.error("❌ AI decision check failed:", err);
-    return { shouldReply: false, reason: "Error in decision making" };
+    // Default to replying on error
+    return { 
+      shouldReply: true, 
+      reason: "AI error - defaulting to engage" 
+    };
   }
 }
 
