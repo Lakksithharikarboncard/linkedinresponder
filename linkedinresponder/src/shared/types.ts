@@ -18,8 +18,8 @@ export interface BotStats {
   repliesSent: number;
   leadsFound: number;
   startTime: number | null;
-  tokensUsed: number;  // ✅ NEW: Track token usage
-  currentModel: string;  // ✅ NEW: Track active model
+  tokensUsed: number;
+  currentModel: string;
 }
 
 export interface BotStatus {
@@ -45,4 +45,42 @@ export interface BotCommand {
     groqModel: string;
     strictHours: boolean;
   };
+}
+
+// ✅ Profile information structure
+export interface LeadProfile {
+  headline: string;
+  jobTitle: string;
+  company: string;
+  location: string;
+  connectionDegree: string;
+  lastScraped: number;
+}
+
+// ✅ Message entry structure
+export interface MessageEntry {
+  speaker: string;
+  content: string;
+  timestamp: number;
+  type: 'sent' | 'received';
+}
+
+// ✅ Conversation history structure
+export interface ConversationHistory {
+  leadId: string;
+  leadName: string;
+  profileUrl: string;
+  profile: LeadProfile | null;
+  messages: MessageEntry[];
+  metadata: {
+    firstContact: number;
+    lastActivity: number;
+    lastMessageFrom: 'lead' | 'me';
+    totalMessages: number;
+    lastSyncedAt: number;
+  };
+}
+
+export interface StoredConversations {
+  [leadId: string]: ConversationHistory;
 }

@@ -1,7 +1,22 @@
-import { BotCommand, BotLogEntry, BotStats, BotStatus } from "../shared/types";
+import { BotCommand, BotLogEntry, BotStats, BotStatus, MessageEntry, ConversationHistory } from "../shared/types";
 import { checkPositiveLead, sendLeadAlertEmail, shouldReplyToConversation } from "../shared/sendEmail";
+import { 
+  generateLeadId, 
+  loadConversation, 
+  saveConversation, 
+  shouldResync 
+} from "../shared/conversationStorage";
+import { 
+  scrapeLeadProfile, 
+  formatProfileForDisplay, 
+  formatProfileForAI 
+} from "../shared/profileScraper";
+import { 
+  shouldDoubleText, 
+  generateDoubleText, 
+  calculateDoubleTextDelay 
+} from "../shared/doubleTextHandler";
 
-// Extend BotCommand to include ping and unread check
 type ContentCommand =
   | BotCommand
   | { type: "PING_TEST" }
@@ -15,6 +30,60 @@ let logs: BotLogEntry[] = [];
 let useStrictHours = true;
 let useGroq = false;
 let groqModel = "llama-3.3-70b-versatile";
+
+// --- HELPER FUNCTIONS FOR CONTEXT-AWARE PROMPTING ---
+function getTimeContext(): string {
+  const hour = new Date().getHours();
+  const day = new Date().getDay();
+  
+  if (day === 0 || day === 6) return "Weekend - keep it casual and light";
+  if (hour < 12) return "Morning - people are busy, be concise";
+  if (hour < 17) return "Afternoon - normal business hours";
+  return "Evening - they might not respond until tomorrow";
+}
+
+function getConversationAge(messages: MessageEntry[]): string {
+  if (messages.length < 2) return "First exchange - establish rapport";
+  
+  const firstMsg = messages[0].timestamp;
+  const daysSince = Math.floor((Date.now() - firstMsg) / (1000 * 60 * 60 * 24));
+  
+  if (daysSince === 0) return "New conversation today";
+  if (daysSince === 1) return "Ongoing conversation";
+  if (daysSince > 7) return "Old conversation - re-engage carefully";
+  return `${daysSince}-day conversation`;
+}
+
+function getResponsePattern(messages: MessageEntry[]): string {
+  const theirMessages = messages.filter(m => m.type === 'received');
+  if (theirMessages.length === 0) return "Unknown";
+  
+  const avgLength = theirMessages.reduce((sum, m) => sum + m.content.split(' ').length, 0) / theirMessages.length;
+  
+  if (avgLength < 10) return "SHORT replies (5-10 words) - match that brevity";
+  if (avgLength < 25) return "MEDIUM replies (10-25 words) - similar length";
+  return "LONG replies (25+ words) - you can elaborate more";
+}
+
+function getToneGuidance(profile: any): string {
+  if (!profile || !profile.jobTitle) return "Professional but friendly";
+  
+  const title = profile.jobTitle.toLowerCase();
+  
+  if (title.includes('ceo') || title.includes('founder') || title.includes('president')) {
+    return "EXECUTIVE - Be direct, concise, value-focused. No fluff.";
+  }
+  
+  if (title.includes('director') || title.includes('vp') || title.includes('head')) {
+    return "SENIOR LEADER - Professional, strategic. Focus on ROI.";
+  }
+  
+  if (title.includes('engineer') || title.includes('developer')) {
+    return "TECHNICAL - Be specific, mention features. Avoid sales speak.";
+  }
+  
+  return "PROFESSIONAL - Warm, helpful, consultative.";
+}
 
 // --- LOGGING & STATS HELPERS ---
 function addLog(type: "INFO" | "ACTION" | "ERROR" | "SUCCESS" | "WARNING", message: string, actor: "User" | "Bot" | "System") {
@@ -144,6 +213,11 @@ function getLeadName(): string | null {
   return el?.textContent?.trim() || null;
 }
 
+function getLeadProfileUrl(): string {
+  const profileLink = document.querySelector<HTMLAnchorElement>('a[href*="/in/"]');
+  return profileLink?.href || window.location.href;
+}
+
 function getLastMessage(leadName: string): { fromLead: boolean; content: string } | null {
   const events = Array.from(document.querySelectorAll("li.msg-s-message-list__event"));
   for (let i = events.length - 1; i >= 0; i--) {
@@ -160,48 +234,166 @@ function getLastMessage(leadName: string): { fromLead: boolean; content: string 
   return null;
 }
 
-function getStructuredConversation(): Array<{ speaker: string; message: string }> {
+async function scrollToLoadAllMessages() {
+  const messagePane = document.querySelector<HTMLElement>(".msg-s-message-list-content");
+  if (!messagePane) return;
+
+  let previousHeight = 0;
+  let currentHeight = messagePane.scrollHeight;
+  let attempts = 0;
+  const maxAttempts = 50;
+
+  addLog("INFO", "Loading full conversation history...", "System");
+
+  while (currentHeight > previousHeight && attempts < maxAttempts) {
+    previousHeight = currentHeight;
+    messagePane.scrollTo({ top: 0, behavior: 'smooth' });
+    await delay(800 + Math.random() * 400);
+    currentHeight = messagePane.scrollHeight;
+    attempts++;
+  }
+
+  addLog("INFO", `Loaded ${attempts} message batches`, "System");
+}
+
+async function getCompleteConversation(leadName: string): Promise<MessageEntry[]> {
+  await scrollToLoadAllMessages();
+
   const events = Array.from(document.querySelectorAll("li.msg-s-message-list__event"));
-  const conversation: Array<{ speaker: string; message: string }> = [];
+  const messages: MessageEntry[] = [];
 
   for (const msgEl of events) {
     const senderEl = msgEl.querySelector("span.msg-s-message-group__name");
     const contentEl = msgEl.querySelector("p.msg-s-event-listitem__body");
+    const timeEl = msgEl.querySelector("time");
+
     if (senderEl && contentEl) {
-      conversation.push({ 
-          speaker: senderEl.textContent?.trim() || "Unknown", 
-          message: contentEl.textContent?.trim() || "" 
-      });
+      const speaker = senderEl.textContent?.trim() || "Unknown";
+      const content = contentEl.textContent?.trim() || "";
+      
+      let timestamp = Date.now();
+      if (timeEl) {
+        const dateTimeAttr = timeEl.getAttribute("datetime");
+        if (dateTimeAttr) {
+          timestamp = new Date(dateTimeAttr).getTime();
+        }
+      }
+
+      const type = speaker.includes(leadName) ? 'received' : 'sent';
+
+      if (content) {
+        messages.push({ speaker, content, timestamp, type });
+      }
     }
   }
+
+  return messages;
+}
+
+async function getOrCreateConversationHistory(leadName: string): Promise<ConversationHistory> {
+  const profileUrl = getLeadProfileUrl();
+  const leadId = generateLeadId(leadName, profileUrl);
+
+  let existingConvo = await loadConversation(leadId);
+
+  if (existingConvo && !shouldResync(existingConvo)) {
+    addLog("INFO", `Using cached data for ${formatProfileForDisplay(leadName, existingConvo.profile)} (${existingConvo.messages.length} msgs)`, "System");
+    return existingConvo;
+  }
+
+  addLog("INFO", `Scraping profile for ${leadName}...`, "System");
+  const profileData = scrapeLeadProfile();
+  
+  addLog("INFO", `Syncing full history for ${leadName}...`, "System");
+  const freshMessages = await getCompleteConversation(leadName);
+
+  const lastMsg = freshMessages[freshMessages.length - 1];
+  const conversation: ConversationHistory = {
+    leadId,
+    leadName,
+    profileUrl,
+    profile: profileData,
+    messages: freshMessages,
+    metadata: {
+      firstContact: freshMessages[0]?.timestamp || Date.now(),
+      lastActivity: lastMsg?.timestamp || Date.now(),
+      lastMessageFrom: lastMsg?.type === 'received' ? 'lead' : 'me',
+      totalMessages: freshMessages.length,
+      lastSyncedAt: Date.now()
+    }
+  };
+
+  await saveConversation(conversation);
+  addLog("SUCCESS", `Saved ${freshMessages.length} messages + profile for ${formatProfileForDisplay(leadName, profileData)}`, "System");
+
   return conversation;
 }
 
-// ✅ UPDATED: Track tokens and add model name
-async function fetchReply(apiKey: string, prompt: string, conversation: any[], leadName: string, myName: string, useGroqAPI: boolean = false, groqModelName: string = "llama-3.3-70b-versatile"): Promise<{ reply: string; tokensUsed: number }> {
-  const conversationText = conversation.map(msg => `${msg.speaker}: ${msg.message}`).join("\n");
-  const systemPrompt = `You are a professional LinkedIn user. Write like a human (brief, casual).
-Context:
-${conversationText}
-${prompt.replace("{extracted_text}", conversationText).replace("{user_name}", leadName)}
-Respond as ${myName}.`;
+async function fetchReply(
+  apiKey: string, 
+  prompt: string, 
+  fullHistory: MessageEntry[], 
+  leadName: string, 
+  myName: string,
+  leadProfile: any,
+  useGroqAPI: boolean = false, 
+  groqModelName: string = "llama-3.3-70b-versatile"
+): Promise<{ reply: string; tokensUsed: number }> {
+  
+  const recentMessages = fullHistory.slice(-30);
+  
+  const conversationText = recentMessages
+    .map(msg => `${msg.speaker}: ${msg.content}`)
+    .join("\n");
 
-  // ✅ Choose API endpoint based on provider
+  // ✅ Context-aware prompt system
+  const timeContext = getTimeContext();
+  const conversationAge = getConversationAge(fullHistory);
+  const responsePattern = getResponsePattern(fullHistory);
+  const toneGuidance = getToneGuidance(leadProfile);
+  const profileContext = leadProfile ? `\n\nLEAD PROFILE:\n${formatProfileForAI(leadProfile)}\n` : "";
+
+  const systemPrompt = `You are a real professional messaging on LinkedIn (NOT an AI assistant).
+${profileContext}
+TIME CONTEXT: ${timeContext}
+CONVERSATION AGE: ${conversationAge}
+THEIR MESSAGING STYLE: ${responsePattern}
+TONE ADJUSTMENT: ${toneGuidance}
+
+CONVERSATION (${fullHistory.length} total messages, showing last ${recentMessages.length}):
+${conversationText}
+
+USER'S INSTRUCTIONS:
+${prompt.replace("{extracted_text}", conversationText).replace("{user_name}", leadName)}
+
+CRITICAL REALISM RULES:
+1. LENGTH: 15-30 words. Real people are busy.
+2. TONE: Match their energy. If they write 5 words, you write 7-10.
+3. NATURAL: Use contractions (I'm, we're, that's). Be conversational.
+4. QUESTIONS: Max ONE follow-up question.
+5. AVOID AI PATTERNS:
+   - "Thank you for reaching out"
+   - "I hope this finds you well"
+   - "I'd be happy to..."
+   - Corporate jargon
+   - Over-enthusiasm (!!!)
+
+Respond as ${myName}. Type like you're between meetings.`;
+
   const apiUrl = useGroqAPI 
     ? "https://api.groq.com/openai/v1/chat/completions"
     : "https://api.openai.com/v1/chat/completions";
 
   const model = useGroqAPI ? groqModelName : "gpt-4o-mini";
 
-  // ✅ FIXED: Dynamic max_tokens based on model
   let maxTokens = 150;
   if (useGroqAPI) {
     if (groqModelName === "openai/gpt-oss-120b") {
-      maxTokens = 500;  // More tokens for verbose GPT-OSS
+      maxTokens = 500;
     } else if (groqModelName === "moonshotai/kimi-k2-instruct-0905") {
-      maxTokens = 250;  // Medium for Kimi K2
+      maxTokens = 250;
     } else {
-      maxTokens = 250;  // Default for Llama 3.3 and others
+      maxTokens = 250;
     }
   }
 
@@ -212,9 +404,9 @@ Respond as ${myName}.`;
       model: model,
       messages: [
           { role: "system", content: systemPrompt },
-          ...conversation.slice(-20).map(msg => ({
-              role: msg.speaker === leadName ? "user" : "assistant",
-              content: msg.message
+          ...recentMessages.map(msg => ({
+              role: msg.type === 'received' ? "user" : "assistant",
+              content: msg.content
           }))
       ],
       max_tokens: maxTokens,
@@ -225,7 +417,6 @@ Respond as ${myName}.`;
   if (!response.ok) throw new Error(`${useGroqAPI ? "Groq" : "OpenAI"} API Error`);
   const data = await response.json();
   
-  // ✅ NEW: Calculate total tokens used
   const tokensUsed = (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0);
   
   return { 
@@ -239,7 +430,6 @@ function getMyName(): string {
   return nameEl?.textContent?.trim() || "You";
 }
 
-// ✅ UPDATED: Get model display name
 function getModelDisplayName(modelId: string): string {
   const modelNames: Record<string, string> = {
     "openai/gpt-oss-120b": "GPT-OSS-120B",
@@ -260,14 +450,10 @@ async function runIteration(n: number) {
   
   const { apiKey, groqApiKey, chatMin, chatMax, loopMin, loopMax, prompt, leadPrompt, targetEmail, startHour, endHour } = await getSettings();
   
-  // ✅ Determine which API key to use
   const activeApiKey = useGroq ? groqApiKey : apiKey;
-  
-  // ✅ Update current model in stats
   const currentModelName = useGroq ? groqModel : "gpt-4o-mini";
   updateStats("currentModel", getModelDisplayName(currentModelName));
   
-  // ✅ CHECK: Strict Mode Working Hours
   if (useStrictHours && !isWithinWorkingHours(startHour, endHour)) {
     addLog("WARNING", `Outside working hours (${startHour}-${endHour}). Pausing.`, "System");
     if (botRunning) {
@@ -286,20 +472,15 @@ async function runIteration(n: number) {
   addLog("INFO", `Found ${chats.length} conversations to check.`, "Bot");
 
   for (let i = 0; i < chats.length && botRunning; i++) {
-    // Scroll & Click
     await humanScroll();
     await randomDelay(chatMin, chatMax);
     const clickable = chats[i].querySelector<HTMLElement>("a, .msg-conversation-listitem__link, [tabindex='0']");
     clickable?.click();
     
-    // Wait for load
-    await delay(2000); 
+    await delay(2000);
 
     const leadName = getLeadName();
     if (!leadName) continue;
-
-    addLog("INFO", `Checking chat with ${leadName}...`, "Bot");
-    updateStats("chatsProcessed", 1);
 
     const lastMsg = getLastMessage(leadName);
     if (!lastMsg || !lastMsg.fromLead) {
@@ -307,13 +488,23 @@ async function runIteration(n: number) {
         continue;
     }
 
-    const structuredConvo = getStructuredConversation();
-    if (structuredConvo.length === 0) continue;
+    const fullConversation = await getOrCreateConversationHistory(leadName);
+    
+    addLog("INFO", `Checking chat with ${formatProfileForDisplay(leadName, fullConversation.profile)}...`, "Bot");
+    updateStats("chatsProcessed", 1);
+    
+    if (fullConversation.messages.length === 0) {
+      addLog("WARNING", `No messages found for ${leadName}`, "System");
+      continue;
+    }
 
-    // AI Decision
+    const recentForDecision = fullConversation.messages
+      .slice(-8)
+      .map(m => ({ speaker: m.speaker, message: m.content }));
+
     let decision;
     try {
-      decision = await shouldReplyToConversation(activeApiKey, structuredConvo, leadName);
+      decision = await shouldReplyToConversation(activeApiKey, recentForDecision, leadName);
       addLog("ACTION", `AI Decision for ${leadName}: ${decision.shouldReply ? "REPLY" : "SKIP"} (${decision.reason})`, "Bot");
     } catch (e) {
       addLog("ERROR", `AI Decision Failed: ${getErrorMsg(e)}`, "System");
@@ -322,13 +513,14 @@ async function runIteration(n: number) {
 
     if (!decision.shouldReply) continue;
 
-    // Lead Alert Logic
     if (targetEmail) {
         try {
-            const recentMsgs = structuredConvo.slice(-2).map(m => m.message);
+            const recentMsgs = fullConversation.messages.slice(-2).map(m => m.content);
             const isPositive = await checkPositiveLead(activeApiKey, leadPrompt, recentMsgs);
             if (isPositive) {
-                const fullChat = structuredConvo.map(m => `${m.speaker}: ${m.message}`).join("\n");
+                const fullChat = fullConversation.messages
+                  .map(m => `${m.speaker}: ${m.content}`)
+                  .join("\n");
                 await sendLeadAlertEmail(leadName, fullChat, targetEmail);
                 updateStats("leadsFound", 1);
                 addLog("SUCCESS", `HOT LEAD FOUND: ${leadName}. Email sent!`, "Bot");
@@ -338,12 +530,19 @@ async function runIteration(n: number) {
         }
     }
 
-    // Generate Reply
     let replyData: { reply: string; tokensUsed: number };
     try {
-      replyData = await fetchReply(activeApiKey, prompt, structuredConvo, leadName, myName, useGroq, groqModel);
+      replyData = await fetchReply(
+        activeApiKey, 
+        prompt, 
+        fullConversation.messages,
+        leadName, 
+        myName,
+        fullConversation.profile,
+        useGroq, 
+        groqModel
+      );
       
-      // ✅ NEW: Update token counter
       updateStats("tokensUsed", stats.tokensUsed + replyData.tokensUsed);
       
     } catch (e) {
@@ -351,38 +550,116 @@ async function runIteration(n: number) {
       continue;
     }
 
-    // Send Reply
+    // ✅ SEND REPLY (with double-text support)
     const input = document.querySelector<HTMLElement>("div.msg-form__contenteditable[role='textbox']");
     const sendBtn = document.querySelector<HTMLButtonElement>("button.msg-form__send-button");
     
     if (input && sendBtn) {
-      const typingDelay = calculateTypingDelay(replyData.reply);
-      addLog("ACTION", `Typing reply to ${leadName} (waiting ${Math.round(typingDelay/1000)}s)...`, "Bot");
-      await delay(typingDelay);
-
-      await humanType(input, replyData.reply);
-      await delay(800);
+      const conversationMeta = {
+        messageCount: fullConversation.messages.length,
+        lastMessageQuestions: (fullConversation.messages[fullConversation.messages.length - 1]?.content.match(/\?/g) || []).length
+      };
       
-      // ✅ FIXED: Check if send button is enabled before clicking
-      const isDisabled = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
-      if (isDisabled) {
-        addLog("ERROR", `Send button disabled for ${leadName} - message might be empty or invalid`, "System");
-      } else {
-        sendBtn.click();
-        await delay(500);  // Wait for UI to update
+      const shouldSplit = shouldDoubleText(replyData.reply, conversationMeta);
+      const doubleTextPattern = shouldSplit ? generateDoubleText(replyData.reply, conversationMeta) : null;
+      
+      if (doubleTextPattern) {
+        // DOUBLE-TEXT MODE
+        addLog("ACTION", `Double-texting ${leadName} (${doubleTextPattern.pattern})...`, "Bot");
         
-        // ✅ FIXED: Verify message was sent (input should be cleared)
-        const inputText = input.textContent?.trim() || "";
-        if (inputText.length > 0) {
-          addLog("WARNING", `Message may not have sent to ${leadName} - input not cleared`, "System");
+        const typingDelay1 = calculateTypingDelay(doubleTextPattern.firstMessage);
+        await delay(typingDelay1);
+        await humanType(input, doubleTextPattern.firstMessage);
+        await delay(800);
+        
+        const isDisabled1 = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
+        if (!isDisabled1) {
+          sendBtn.click();
+          await delay(500);
+          
+          const betweenDelay = calculateDoubleTextDelay(doubleTextPattern.pattern);
+          addLog("INFO", `Waiting ${Math.round(betweenDelay/1000)}s before second message...`, "Bot");
+          await delay(betweenDelay);
+          
+          const typingDelay2 = calculateTypingDelay(doubleTextPattern.secondMessage);
+          await delay(typingDelay2);
+          await humanType(input, doubleTextPattern.secondMessage);
+          await delay(800);
+          
+          const isDisabled2 = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
+          if (!isDisabled2) {
+            sendBtn.click();
+            await delay(500);
+            
+            updateStats("repliesSent", 1);
+            
+            fullConversation.messages.push(
+              {
+                speaker: myName,
+                content: doubleTextPattern.firstMessage,
+                timestamp: Date.now() - betweenDelay,
+                type: 'sent'
+              },
+              {
+                speaker: myName,
+                content: doubleTextPattern.secondMessage,
+                timestamp: Date.now(),
+                type: 'sent'
+              }
+            );
+            
+            fullConversation.metadata.lastActivity = Date.now();
+            fullConversation.metadata.lastMessageFrom = 'me';
+            fullConversation.metadata.totalMessages += 2;
+            fullConversation.metadata.lastSyncedAt = Date.now();
+            
+            await saveConversation(fullConversation);
+            
+            addLog("SUCCESS", `Double-texted ${formatProfileForDisplay(leadName, fullConversation.profile)} (${getModelDisplayName(currentModelName)}) [History: ${fullConversation.messages.length} msgs]`, "Bot");
+          }
+        }
+        
+      } else {
+        // SINGLE MESSAGE MODE
+        const typingDelay = calculateTypingDelay(replyData.reply);
+        addLog("ACTION", `Typing reply to ${leadName} (waiting ${Math.round(typingDelay/1000)}s)...`, "Bot");
+        await delay(typingDelay);
+
+        await humanType(input, replyData.reply);
+        await delay(800);
+        
+        const isDisabled = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
+        if (!isDisabled) {
+          sendBtn.click();
+          await delay(500);
+          
+          const inputText = input.textContent?.trim() || "";
+          if (inputText.length === 0) {
+            updateStats("repliesSent", 1);
+            
+            fullConversation.messages.push({
+              speaker: myName,
+              content: replyData.reply,
+              timestamp: Date.now(),
+              type: 'sent'
+            });
+            fullConversation.metadata.lastActivity = Date.now();
+            fullConversation.metadata.lastMessageFrom = 'me';
+            fullConversation.metadata.totalMessages++;
+            fullConversation.metadata.lastSyncedAt = Date.now();
+            
+            await saveConversation(fullConversation);
+            
+            addLog("SUCCESS", `Sent reply to ${formatProfileForDisplay(leadName, fullConversation.profile)} (${getModelDisplayName(currentModelName)}) [History: ${fullConversation.messages.length} msgs]`, "Bot");
+          } else {
+            addLog("WARNING", `Message may not have sent to ${leadName}`, "System");
+          }
         } else {
-          updateStats("repliesSent", 1);
-          // ✅ NEW: Show model name in success log
-          addLog("SUCCESS", `Sent reply to ${leadName} (${getModelDisplayName(currentModelName)})`, "Bot");
+          addLog("ERROR", `Send button disabled for ${leadName}`, "System");
         }
       }
     } else {
-        addLog("ERROR", "Could not find chat input box", "System");
+      addLog("ERROR", "Could not find chat input box", "System");
     }
 
     await randomDelay(chatMin, chatMax);
@@ -425,7 +702,7 @@ chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse
     if (!botRunning) {
         botRunning = true;
         stats.startTime = Date.now();
-        stats.tokensUsed = 0;  // ✅ Reset token counter on start
+        stats.tokensUsed = 0;
         useStrictHours = msg.config?.strictHours ?? true;
         useGroq = msg.config?.useGroq ?? false;
         groqModel = msg.config?.groqModel ?? "llama-3.3-70b-versatile";

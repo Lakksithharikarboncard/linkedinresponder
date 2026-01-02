@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BotCommand, BotStatus, BotLogEntry, BotStats } from "../shared/types";
 import "./popup.css";
 
+
 const Popup = () => {
   const [running, setRunning] = useState(false);
   const [stats, setStats] = useState<BotStats>({
@@ -19,6 +20,9 @@ const Popup = () => {
   const [sessionSummary, setSessionSummary] = useState<any>(null);
   const [copied, setCopied] = useState(false);
 
+  // ✅ NEW: Storage stats
+  const [storageStats, setStorageStats] = useState({ conversationCount: 0, totalMessages: 0 });
+
   const [nChats, setNChats] = useState(10);
   const [model, setModel] = useState("gpt-4o-mini");
   const [useGroq, setUseGroq] = useState(false);
@@ -26,9 +30,11 @@ const Popup = () => {
   const [strictHours, setStrictHours] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+
   const sendToContent = async (msg: BotCommand): Promise<any> => {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tabs[0]?.id) throw new Error("No active tab");
+
 
     return new Promise((resolve) => {
       chrome.tabs.sendMessage(tabs[0].id!, msg, (response) => {
@@ -38,8 +44,9 @@ const Popup = () => {
     });
   };
 
+
   useEffect(() => {
-    // ✅ Load saved toggle states first
+    // Load saved toggle states first
     chrome.storage.local.get(
       ["savedUseGroq", "savedGroqModel", "savedStrictHours"],
       (data) => {
@@ -48,6 +55,19 @@ const Popup = () => {
         if (data.savedStrictHours !== undefined) setStrictHours(data.savedStrictHours);
       }
     );
+
+    // ✅ NEW: Load storage stats
+    const loadStorageStats = () => {
+      chrome.storage.local.get(["conversation_histories"], (result) => {
+        const histories = result.conversation_histories || {};
+        const count = Object.keys(histories).length;
+        const totalMessages = Object.values(histories).reduce(
+          (sum: number, convo: any) => sum + (convo.messages?.length || 0),
+          0
+        );
+        setStorageStats({ conversationCount: count, totalMessages });
+      });
+    };
 
     const syncState = async () => {
       try {
@@ -67,26 +87,35 @@ const Popup = () => {
       }
     };
 
+
     syncState();
-    const interval = setInterval(syncState, 1000);
+    loadStorageStats(); // ✅ Initial load
+    const interval = setInterval(() => {
+      syncState();
+      loadStorageStats(); // ✅ Refresh every second
+    }, 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // ✅ Handlers to save toggle states
+
+  // Handlers to save toggle states
   const handleUseGroqChange = (value: boolean) => {
     setUseGroq(value);
     chrome.storage.local.set({ savedUseGroq: value });
   };
+
 
   const handleGroqModelChange = (value: string) => {
     setGroqModel(value);
     chrome.storage.local.set({ savedGroqModel: value });
   };
 
+
   const handleStrictHoursChange = (value: boolean) => {
     setStrictHours(value);
     chrome.storage.local.set({ savedStrictHours: value });
   };
+
 
   const handleStart = async () => {
     setLoading(true);
@@ -94,6 +123,7 @@ const Popup = () => {
     setRunning(true);
     setLoading(false);
   };
+
 
   const handleStop = async () => {
     setLoading(true);
@@ -119,6 +149,7 @@ const Popup = () => {
     setShowSummary(true);
   };
 
+
   const handleCopyLogs = () => {
     const logText = logs
       .map((log) => {
@@ -133,10 +164,20 @@ const Popup = () => {
     });
   };
 
+  // ✅ NEW: Clear storage handler
+  const handleClearStorage = () => {
+    if (!confirm(`Clear ${storageStats.conversationCount} conversation histories?\n\nThis cannot be undone.`)) return;
+    chrome.storage.local.set({ conversation_histories: {} }, () => {
+      setStorageStats({ conversationCount: 0, totalMessages: 0 });
+    });
+  };
+
+
   const openOptionsPage = () => {
     if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
     else window.open(chrome.runtime.getURL("options.html"));
   };
+
 
   const uptime = (() => {
     if (!stats.startTime) return "—";
@@ -145,6 +186,7 @@ const Popup = () => {
     const ss = String(secs % 60).padStart(2, "0");
     return `${mm}:${ss}`;
   })();
+
 
   // Calculate token limit based on current model
   const getTokenLimit = () => {
@@ -155,8 +197,10 @@ const Popup = () => {
     return 100000;
   };
 
+
   const tokenLimit = getTokenLimit();
   const tokenPercent = tokenLimit > 0 ? Math.min(100, Math.round((stats.tokensUsed / tokenLimit) * 100)) : 0;
+
 
   if (loading) {
     return (
@@ -167,6 +211,7 @@ const Popup = () => {
       </div>
     );
   }
+
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "linear-gradient(135deg, #fbf2c4, #e5c185)" }}>
@@ -202,42 +247,50 @@ const Popup = () => {
               ✅ Session Complete
             </h2>
 
+
             <div style={{ display: "grid", gap: "10px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
                 <span style={{ fontSize: "11px", color: "#6c757d" }}>Duration:</span>
                 <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.duration}</span>
               </div>
 
+
               <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
                 <span style={{ fontSize: "11px", color: "#6c757d" }}>Processed:</span>
                 <span style={{ fontSize: "11px", fontWeight: "600", color: "#008585" }}>{sessionSummary.processed}</span>
               </div>
+
 
               <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
                 <span style={{ fontSize: "11px", color: "#6c757d" }}>Replied:</span>
                 <span style={{ fontSize: "11px", fontWeight: "600", color: "#74a892" }}>{sessionSummary.replied}</span>
               </div>
 
+
               <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
                 <span style={{ fontSize: "11px", color: "#6c757d" }}>Skipped:</span>
                 <span style={{ fontSize: "11px", fontWeight: "600", color: "#6c757d" }}>{sessionSummary.skipped}</span>
               </div>
+
 
               <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
                 <span style={{ fontSize: "11px", color: "#6c757d" }}>Leads Found:</span>
                 <span style={{ fontSize: "11px", fontWeight: "600", color: "#c7522a" }}>{sessionSummary.leads}</span>
               </div>
 
+
               <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
                 <span style={{ fontSize: "11px", color: "#6c757d" }}>Tokens Used:</span>
                 <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.tokens.toLocaleString()}</span>
               </div>
+
 
               <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
                 <span style={{ fontSize: "11px", color: "#6c757d" }}>Model:</span>
                 <span style={{ fontSize: "10px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.model}</span>
               </div>
             </div>
+
 
             <button
               onClick={() => setShowSummary(false)}
@@ -259,6 +312,7 @@ const Popup = () => {
           </div>
         </div>
       )}
+
 
       {/* HEADER */}
       <div
@@ -292,6 +346,7 @@ const Popup = () => {
             </div>
           </div>
 
+
           <div style={{ textAlign: "right" }}>
             <div
               style={{
@@ -308,6 +363,7 @@ const Popup = () => {
             <div style={{ fontSize: "9px", marginTop: "3px", opacity: 0.8 }}>⏱ {uptime}</div>
           </div>
         </div>
+
 
         {errorMsg && (
           <div
@@ -326,6 +382,7 @@ const Popup = () => {
         )}
       </div>
 
+
       {/* CONTENT */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px", display: "flex", flexDirection: "column", gap: "10px" }}>
         {/* STATS - Compact */}
@@ -340,22 +397,39 @@ const Popup = () => {
             <div style={{ fontSize: "8px", color: "#74a892" }}>● Live</div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px", marginBottom: "8px" }}>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px", marginBottom: "6px" }}>
             <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
               <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Processed</div>
               <div style={{ fontSize: "16px", fontWeight: "600", color: "#008585" }}>{stats.chatsProcessed}</div>
             </div>
+
 
             <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
               <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Replied</div>
               <div style={{ fontSize: "16px", fontWeight: "600", color: "#74a892" }}>{stats.repliesSent}</div>
             </div>
 
+
             <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
               <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Leads</div>
               <div style={{ fontSize: "16px", fontWeight: "600", color: "#c7522a" }}>{stats.leadsFound}</div>
             </div>
           </div>
+
+          {/* ✅ NEW: Second row with storage stats */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "8px" }}>
+            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
+              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Conversations</div>
+              <div style={{ fontSize: "16px", fontWeight: "600", color: "#173a35" }}>{storageStats.conversationCount}</div>
+            </div>
+
+            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
+              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Messages</div>
+              <div style={{ fontSize: "16px", fontWeight: "600", color: "#173a35" }}>{storageStats.totalMessages}</div>
+            </div>
+          </div>
+
 
           {/* TOKEN COUNTER */}
           {useGroq && tokenLimit > 0 && (
@@ -383,6 +457,7 @@ const Popup = () => {
           )}
         </div>
 
+
         {/* CONTROLS - Compact */}
         <div style={{ background: "white", borderRadius: "10px", padding: "10px", border: "1px solid #e5e5e5" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px" }}>
@@ -395,6 +470,7 @@ const Popup = () => {
             </svg>
             <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>Controls</span>
           </div>
+
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" }}>
             <div>
@@ -416,6 +492,7 @@ const Popup = () => {
                 }}
               />
             </div>
+
 
             <div>
               <label style={{ fontSize: "9px", color: "#6c757d", display: "block", marginBottom: "3px" }}>
@@ -463,7 +540,8 @@ const Popup = () => {
             </div>
           </div>
 
-          {/* ✅ USE GROQ TOGGLE - COMPACT */}
+
+          {/* USE GROQ TOGGLE - COMPACT */}
           <label
             onClick={() => !running && handleUseGroqChange(!useGroq)}
             style={{
@@ -511,7 +589,8 @@ const Popup = () => {
             </div>
           </label>
 
-          {/* ✅ STRICT HOURS TOGGLE - COMPACT */}
+
+          {/* STRICT HOURS TOGGLE - COMPACT */}
           <label
             onClick={() => !running && handleStrictHoursChange(!strictHours)}
             style={{
@@ -559,6 +638,7 @@ const Popup = () => {
             </div>
           </label>
 
+
           <div style={{ display: "flex", gap: "6px" }}>
             <button
               onClick={openOptionsPage}
@@ -576,6 +656,7 @@ const Popup = () => {
             >
               Settings
             </button>
+
 
             <button
               onClick={handleStart}
@@ -595,6 +676,7 @@ const Popup = () => {
               ▶ Start
             </button>
 
+
             <button
               onClick={handleStop}
               disabled={!running}
@@ -613,7 +695,37 @@ const Popup = () => {
               ■ Stop
             </button>
           </div>
+
+          {/* ✅ NEW: Clear Storage Button */}
+          {storageStats.conversationCount > 0 && (
+            <button
+              onClick={handleClearStorage}
+              disabled={running}
+              style={{
+                width: "100%",
+                marginTop: "6px",
+                padding: "6px",
+                background: running ? "#dee2e6" : "#f8f9fa",
+                border: "1px solid #dee2e6",
+                borderRadius: "6px",
+                fontSize: "9px",
+                fontWeight: "500",
+                color: running ? "#6c757d" : "#c7522a",
+                cursor: running ? "not-allowed" : "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "4px",
+              }}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+              Clear {storageStats.conversationCount} conversation{storageStats.conversationCount !== 1 ? 's' : ''}
+            </button>
+          )}
         </div>
+
 
         {/* TERMINAL - Expanded and Taller */}
         <div style={{ background: "#1a1f1e", borderRadius: "10px", overflow: "hidden", border: "1px solid #2a2f2e", flex: 1, display: "flex", flexDirection: "column" }}>
@@ -671,6 +783,7 @@ const Popup = () => {
             </div>
           </div>
 
+
           <div
             className="log-container"
             style={{
@@ -684,27 +797,42 @@ const Popup = () => {
             }}
           >
             {logs.length === 0 && <div style={{ opacity: 0.5, fontStyle: "italic" }}>Ready.</div>}
-            {logs.map((log, i) => (
-              <div key={i} style={{ display: "flex", gap: "8px", marginBottom: "3px" }}>
-                <span style={{ opacity: 0.6, minWidth: "65px" }}>
-                  {new Date(log.time).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                </span>
-                <span
-                  style={{
-                    opacity: 0.8,
-                    minWidth: "50px",
-                    color: log.actor === "Bot" ? "#74a892" : log.actor === "User" ? "#e5c185" : "#fbf2c4",
-                  }}
-                >
-                  {log.actor}
-                </span>
-                <span style={{ opacity: log.type === "ERROR" ? 1 : 0.9, color: log.type === "ERROR" ? "#c7522a" : "inherit" }}>
-                  {log.message}
-                </span>
-              </div>
-            ))}
+            {logs.map((log, i) => {
+              // ✅ Detect special log types
+              const isDoubleText = log.message.includes('Double-texting') || log.message.includes('double-text');
+              const isProfileLog = log.message.includes('(') && log.message.includes('@');
+              const isStorageLog = log.message.includes('Saved') && log.message.includes('messages');
+              
+              return (
+                <div key={i} style={{ display: "flex", gap: "8px", marginBottom: "3px" }}>
+                  <span style={{ opacity: 0.6, minWidth: "65px" }}>
+                    {new Date(log.time).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                  </span>
+                  <span
+                    style={{
+                      opacity: 0.8,
+                      minWidth: "50px",
+                      color: log.actor === "Bot" ? "#74a892" : log.actor === "User" ? "#e5c185" : "#fbf2c4",
+                    }}
+                  >
+                    {log.actor}
+                  </span>
+                  <span style={{ 
+                    opacity: log.type === "ERROR" ? 1 : 0.9, 
+                    color: log.type === "ERROR" ? "#c7522a" : isDoubleText ? "#e5c185" : "inherit",
+                    fontWeight: isDoubleText || isStorageLog ? "600" : "normal"
+                  }}>
+                    {isDoubleText && "💬 "}
+                    {isProfileLog && "👤 "}
+                    {isStorageLog && "💾 "}
+                    {log.message}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
+
 
         <div style={{ textAlign: "center", fontSize: "8px", color: "#6c757d", marginTop: "2px" }}>
           v2.4.0 • linkedIn autoresponder
@@ -713,6 +841,7 @@ const Popup = () => {
     </div>
   );
 };
+
 
 const root = createRoot(document.getElementById("popup-root")!);
 root.render(<Popup />);
