@@ -1,11 +1,23 @@
-import React, { useEffect, useState } from "react";
+// linkedinresponder/src/popup/popup.tsx
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BotCommand, BotStatus, BotLogEntry, BotStats } from "../shared/types";
 import "./popup.css";
 
+const STATUS_POLL_MS = 1000;
+const STORAGE_FALLBACK_POLL_MS = 15_000;
+const AUTO_SCROLL_THRESHOLD_PX = 60;
+
+interface PendingReply {
+  leadName: string;
+  reply: string;
+  timestamp: number;
+}
 
 const Popup = () => {
   const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [stats, setStats] = useState<BotStats>({
     chatsProcessed: 0,
     repliesSent: 0,
@@ -20,7 +32,6 @@ const Popup = () => {
   const [sessionSummary, setSessionSummary] = useState<any>(null);
   const [copied, setCopied] = useState(false);
 
-  // ✅ NEW: Storage stats
   const [storageStats, setStorageStats] = useState({ conversationCount: 0, totalMessages: 0 });
 
   const [nChats, setNChats] = useState(10);
@@ -30,11 +41,20 @@ const Popup = () => {
   const [strictHours, setStrictHours] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const [replyPreviewEnabled, setReplyPreviewEnabled] = useState(false);
+  const [pendingReply, setPendingReply] = useState<PendingReply | null>(null);
+  const [editedReply, setEditedReply] = useState("");
 
-  const sendToContent = async (msg: BotCommand): Promise<any> => {
+  const [tick, setTick] = useState(0);
+
+  const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const shouldAutoScrollRef = useRef(true);
+  const statusIntervalRef = useRef<number | null>(null);
+  const storageFallbackIntervalRef = useRef<number | null>(null);
+
+  const sendToContent = async (msg: BotCommand | any): Promise<any> => {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tabs[0]?.id) throw new Error("No active tab");
-
 
     return new Promise((resolve) => {
       chrome.tabs.sendMessage(tabs[0].id!, msg, (response) => {
@@ -44,30 +64,51 @@ const Popup = () => {
     });
   };
 
+  const loadStorageStats = () => {
+    chrome.storage.local.get(["conversation_histories"], (result) => {
+      const histories = result.conversation_histories || {};
+      const count = Object.keys(histories).length;
+      const totalMessages = Object.values(histories).reduce(
+        (sum: number, convo: any) => sum + (convo.messages?.length || 0),
+        0
+      );
+      setStorageStats({ conversationCount: count, totalMessages });
+    });
+  };
 
   useEffect(() => {
-    // Load saved toggle states first
     chrome.storage.local.get(
-      ["savedUseGroq", "savedGroqModel", "savedStrictHours"],
+      ["savedUseGroq", "savedGroqModel", "savedStrictHours", "savedModel", "replyPreviewEnabled"],
       (data) => {
         if (data.savedUseGroq !== undefined) setUseGroq(data.savedUseGroq);
         if (data.savedGroqModel) setGroqModel(data.savedGroqModel);
         if (data.savedStrictHours !== undefined) setStrictHours(data.savedStrictHours);
+        if (data.savedModel) setModel(data.savedModel);
+        if (data.replyPreviewEnabled !== undefined) setReplyPreviewEnabled(data.replyPreviewEnabled);
       }
     );
 
-    // ✅ NEW: Load storage stats
-    const loadStorageStats = () => {
-      chrome.storage.local.get(["conversation_histories"], (result) => {
-        const histories = result.conversation_histories || {};
-        const count = Object.keys(histories).length;
-        const totalMessages = Object.values(histories).reduce(
+    const onStorageChanged: Parameters<typeof chrome.storage.onChanged.addListener>[0] = (changes, areaName) => {
+      if (areaName !== "local") return;
+      if (changes.conversation_histories) {
+        const newVal = changes.conversation_histories.newValue || {};
+        const count = Object.keys(newVal).length;
+        const totalMessages = Object.values(newVal).reduce(
           (sum: number, convo: any) => sum + (convo.messages?.length || 0),
           0
         );
         setStorageStats({ conversationCount: count, totalMessages });
-      });
+      }
+      if (changes.pendingReply) {
+        const pending = changes.pendingReply.newValue;
+        if (pending && replyPreviewEnabled) {
+          setPendingReply(pending);
+          setEditedReply(pending.reply);
+        }
+      }
     };
+
+    chrome.storage.onChanged.addListener(onStorageChanged);
 
     const syncState = async () => {
       try {
@@ -75,7 +116,21 @@ const Popup = () => {
         if (status) {
           setRunning(status.running);
           setStats(status.stats);
-          setLogs(status.logs);
+
+          setLogs((prevLogs) => {
+            if (prevLogs.length !== status.logs.length) {
+              return status.logs;
+            }
+            if (prevLogs.length > 0 && status.logs.length > 0) {
+              const prevLatest = prevLogs[0];
+              const newLatest = status.logs[0];
+              if (prevLatest.time !== newLatest.time || prevLatest.message !== newLatest.message) {
+                return status.logs;
+              }
+            }
+            return prevLogs;
+          });
+
           setErrorMsg(null);
         } else {
           setErrorMsg("Navigate to LinkedIn Messaging");
@@ -87,53 +142,115 @@ const Popup = () => {
       }
     };
 
-
     syncState();
-    loadStorageStats(); // ✅ Initial load
-    const interval = setInterval(() => {
-      syncState();
-      loadStorageStats(); // ✅ Refresh every second
+    loadStorageStats();
+
+    statusIntervalRef.current = window.setInterval(syncState, STATUS_POLL_MS);
+    storageFallbackIntervalRef.current = window.setInterval(loadStorageStats, STORAGE_FALLBACK_POLL_MS);
+
+    const tickInterval = window.setInterval(() => {
+      setTick((t) => t + 1);
     }, 1000);
-    return () => clearInterval(interval);
+
+    return () => {
+      if (statusIntervalRef.current !== null) window.clearInterval(statusIntervalRef.current);
+      if (storageFallbackIntervalRef.current !== null) window.clearInterval(storageFallbackIntervalRef.current);
+      window.clearInterval(tickInterval);
+      chrome.storage.onChanged.removeListener(onStorageChanged);
+    };
+  }, [replyPreviewEnabled]);
+
+  useEffect(() => {
+    const el = logContainerRef.current;
+    if (!el) return;
+
+    const onScroll = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      shouldAutoScrollRef.current = distanceFromBottom < AUTO_SCROLL_THRESHOLD_PX;
+    };
+
+    const onMouseDown = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom > AUTO_SCROLL_THRESHOLD_PX) {
+        shouldAutoScrollRef.current = false;
+      }
+    };
+
+    el.addEventListener("scroll", onScroll, { passive: true });
+    el.addEventListener("mousedown", onMouseDown, { passive: true });
+
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      el.removeEventListener("mousedown", onMouseDown);
+    };
   }, []);
 
+  useEffect(() => {
+    const el = logContainerRef.current;
+    if (!el) return;
+    if (!shouldAutoScrollRef.current) return;
 
-  // Handlers to save toggle states
+    requestAnimationFrame(() => {
+      if (shouldAutoScrollRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+  }, [logs]);
+
   const handleUseGroqChange = (value: boolean) => {
     setUseGroq(value);
     chrome.storage.local.set({ savedUseGroq: value });
   };
-
 
   const handleGroqModelChange = (value: string) => {
     setGroqModel(value);
     chrome.storage.local.set({ savedGroqModel: value });
   };
 
-
   const handleStrictHoursChange = (value: boolean) => {
     setStrictHours(value);
     chrome.storage.local.set({ savedStrictHours: value });
   };
 
+  const handleModelChange = (value: string) => {
+    setModel(value);
+    chrome.storage.local.set({ savedModel: value });
+  };
+
+  const handleReplyPreviewChange = (value: boolean) => {
+    setReplyPreviewEnabled(value);
+    chrome.storage.local.set({ replyPreviewEnabled: value });
+  };
 
   const handleStart = async () => {
     setLoading(true);
-    await sendToContent({ type: "START_BOT", config: { nChats, model, useGroq, groqModel, strictHours } });
+    await sendToContent({
+      type: "START_BOT",
+      config: { nChats, model, useGroq, groqModel, strictHours, replyPreviewEnabled },
+    });
     setRunning(true);
+    setPaused(false);
     setLoading(false);
   };
 
+  const handlePause = async () => {
+    await sendToContent({ type: "PAUSE_BOT" });
+    setPaused(true);
+  };
+
+  const handleResume = async () => {
+    await sendToContent({ type: "RESUME_BOT" });
+    setPaused(false);
+  };
 
   const handleStop = async () => {
     setLoading(true);
     await sendToContent({ type: "STOP_BOT" });
-    
-    // Calculate session summary
+
     const duration = stats.startTime ? Date.now() - stats.startTime : 0;
     const durationMins = Math.floor(duration / 60000);
     const durationSecs = Math.floor((duration % 60000) / 1000);
-    
+
     setSessionSummary({
       duration: `${durationMins}m ${durationSecs}s`,
       processed: stats.chatsProcessed,
@@ -143,28 +260,74 @@ const Popup = () => {
       tokens: stats.tokensUsed,
       model: stats.currentModel || (useGroq ? groqModel : model),
     });
-    
+
     setRunning(false);
+    setPaused(false);
     setLoading(false);
     setShowSummary(true);
   };
 
+  const handleApproveReply = async () => {
+    if (!pendingReply) return;
+    await sendToContent({
+      type: "APPROVE_REPLY",
+      reply: editedReply,
+      leadName: pendingReply.leadName,
+    });
+    setPendingReply(null);
+    setEditedReply("");
+    chrome.storage.local.remove(["pendingReply"]);
+  };
+
+  const handleRejectReply = async () => {
+    if (!pendingReply) return;
+    await sendToContent({
+      type: "REJECT_REPLY",
+      leadName: pendingReply.leadName,
+    });
+    setPendingReply(null);
+    setEditedReply("");
+    chrome.storage.local.remove(["pendingReply"]);
+  };
+
+  const handleExportConversations = () => {
+    chrome.storage.local.get(["conversation_histories"], (result) => {
+      const data = result.conversation_histories || {};
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `linkedin-conversations-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  };
 
   const handleCopyLogs = () => {
     const logText = logs
       .map((log) => {
-        const time = new Date(log.time).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const time = new Date(log.time).toLocaleTimeString([], {
+          hour12: false,
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
         return `[${time}] ${log.actor}: ${log.message}`;
       })
       .join("\n");
-    
-    navigator.clipboard.writeText(logText).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+
+    navigator.clipboard
+      .writeText(logText)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {
+        setErrorMsg("Clipboard copy failed");
+        setTimeout(() => setErrorMsg(null), 2500);
+      });
   };
 
-  // ✅ NEW: Clear storage handler
   const handleClearStorage = () => {
     if (!confirm(`Clear ${storageStats.conversationCount} conversation histories?\n\nThis cannot be undone.`)) return;
     chrome.storage.local.set({ conversation_histories: {} }, () => {
@@ -172,23 +335,19 @@ const Popup = () => {
     });
   };
 
-
   const openOptionsPage = () => {
     if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
     else window.open(chrome.runtime.getURL("options.html"));
   };
 
-
-  const uptime = (() => {
+  const uptime = useMemo(() => {
     if (!stats.startTime) return "—";
     const secs = Math.max(0, Math.floor((Date.now() - stats.startTime) / 1000));
     const mm = String(Math.floor(secs / 60)).padStart(2, "0");
     const ss = String(secs % 60).padStart(2, "0");
     return `${mm}:${ss}`;
-  })();
+  }, [stats.startTime, tick]);
 
-
-  // Calculate token limit based on current model
   const getTokenLimit = () => {
     if (!useGroq) return 0;
     if (groqModel === "openai/gpt-oss-120b") return 200000;
@@ -197,24 +356,101 @@ const Popup = () => {
     return 100000;
   };
 
-
   const tokenLimit = getTokenLimit();
   const tokenPercent = tokenLimit > 0 ? Math.min(100, Math.round((stats.tokensUsed / tokenLimit) * 100)) : 0;
 
-
   if (loading) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: "14px", color: "#173a35" }}>Loading...</div>
-        </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>
+        <div style={{ fontSize: "14px", color: "#173a35" }}>Loading...</div>
       </div>
     );
   }
 
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "linear-gradient(135deg, #fbf2c4, #e5c185)" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "linear-gradient(135deg, #fbf2c4, #e5c185)" }}>
+      
+      {/* REPLY PREVIEW MODAL */}
+      {pendingReply && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+        >
+          <div
+            style={{
+              background: "white",
+              borderRadius: "12px",
+              padding: "16px",
+              maxWidth: "380px",
+              width: "95%",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+            }}
+          >
+            <h2 style={{ fontSize: "14px", fontWeight: "600", color: "#173a35", marginBottom: "8px" }}>
+              📝 Review Reply to {pendingReply.leadName}
+            </h2>
+            <textarea
+              value={editedReply}
+              onChange={(e) => setEditedReply(e.target.value)}
+              style={{
+                width: "100%",
+                minHeight: "100px",
+                padding: "10px",
+                border: "1px solid #dee2e6",
+                borderRadius: "6px",
+                fontSize: "12px",
+                fontFamily: "inherit",
+                resize: "vertical",
+              }}
+            />
+            <div style={{ display: "flex", gap: "8px", marginTop: "12px" }}>
+              <button
+                onClick={handleRejectReply}
+                style={{
+                  flex: 1,
+                  padding: "10px",
+                  background: "#f8f9fa",
+                  border: "1px solid #dee2e6",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  fontWeight: "500",
+                  color: "#c7522a",
+                  cursor: "pointer",
+                }}
+              >
+                ✕ Skip
+              </button>
+              <button
+                onClick={handleApproveReply}
+                style={{
+                  flex: 1,
+                  padding: "10px",
+                  background: "#008585",
+                  border: "none",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  fontWeight: "500",
+                  color: "white",
+                  cursor: "pointer",
+                }}
+              >
+                ✓ Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* SESSION SUMMARY MODAL */}
       {showSummary && sessionSummary && (
         <div
@@ -247,50 +483,15 @@ const Popup = () => {
               ✅ Session Complete
             </h2>
 
-
             <div style={{ display: "grid", gap: "10px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
-                <span style={{ fontSize: "11px", color: "#6c757d" }}>Duration:</span>
-                <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.duration}</span>
-              </div>
-
-
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
-                <span style={{ fontSize: "11px", color: "#6c757d" }}>Processed:</span>
-                <span style={{ fontSize: "11px", fontWeight: "600", color: "#008585" }}>{sessionSummary.processed}</span>
-              </div>
-
-
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
-                <span style={{ fontSize: "11px", color: "#6c757d" }}>Replied:</span>
-                <span style={{ fontSize: "11px", fontWeight: "600", color: "#74a892" }}>{sessionSummary.replied}</span>
-              </div>
-
-
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
-                <span style={{ fontSize: "11px", color: "#6c757d" }}>Skipped:</span>
-                <span style={{ fontSize: "11px", fontWeight: "600", color: "#6c757d" }}>{sessionSummary.skipped}</span>
-              </div>
-
-
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
-                <span style={{ fontSize: "11px", color: "#6c757d" }}>Leads Found:</span>
-                <span style={{ fontSize: "11px", fontWeight: "600", color: "#c7522a" }}>{sessionSummary.leads}</span>
-              </div>
-
-
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
-                <span style={{ fontSize: "11px", color: "#6c757d" }}>Tokens Used:</span>
-                <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.tokens.toLocaleString()}</span>
-              </div>
-
-
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
-                <span style={{ fontSize: "11px", color: "#6c757d" }}>Model:</span>
-                <span style={{ fontSize: "10px", fontWeight: "600", color: "#173a35" }}>{sessionSummary.model}</span>
-              </div>
+              <SummaryRow label="Duration" value={sessionSummary.duration} valueColor="#173a35" />
+              <SummaryRow label="Processed" value={sessionSummary.processed} valueColor="#008585" />
+              <SummaryRow label="Replied" value={sessionSummary.replied} valueColor="#74a892" />
+              <SummaryRow label="Skipped" value={sessionSummary.skipped} valueColor="#6c757d" />
+              <SummaryRow label="Leads Found" value={sessionSummary.leads} valueColor="#c7522a" />
+              <SummaryRow label="Tokens Used" value={sessionSummary.tokens.toLocaleString()} valueColor="#173a35" />
+              <SummaryRow label="Model" value={sessionSummary.model} valueColor="#173a35" small />
             </div>
-
 
             <button
               onClick={() => setShowSummary(false)}
@@ -313,67 +514,64 @@ const Popup = () => {
         </div>
       )}
 
-
       {/* HEADER */}
       <div
         style={{
           background: "linear-gradient(135deg, #c7522a, #008585)",
           color: "white",
-          padding: "14px 16px",
+          padding: "12px 14px",
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
             <div
               style={{
-                width: "36px",
-                height: "36px",
+                width: "32px",
+                height: "32px",
                 background: "rgba(255,255,255,0.2)",
-                borderRadius: "10px",
+                borderRadius: "8px",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 border: "1px solid rgba(255,255,255,0.3)",
               }}
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="white" strokeWidth="2" />
               </svg>
             </div>
             <div>
-              <div style={{ fontSize: "15px", fontWeight: "600" }}>linkedIn autoresponder</div>
-              <div style={{ fontSize: "10px", opacity: 0.9 }}>Human-like LinkedIn agent</div>
+              <div style={{ fontSize: "14px", fontWeight: "600" }}>LinkedIn Autoresponder</div>
+              <div style={{ fontSize: "9px", opacity: 0.9 }}>Human-like AI agent</div>
             </div>
           </div>
-
 
           <div style={{ textAlign: "right" }}>
             <div
               style={{
-                padding: "3px 10px",
+                padding: "2px 8px",
                 borderRadius: "20px",
-                fontSize: "10px",
+                fontSize: "9px",
                 fontWeight: "500",
-                background: running ? "#74a892" : "rgba(255,255,255,0.2)",
+                background: running ? (paused ? "#e5c185" : "#74a892") : "rgba(255,255,255,0.2)",
                 border: "1px solid rgba(255,255,255,0.3)",
               }}
             >
-              {running ? "● Running" : "○ Idle"}
+              {running ? (paused ? "❚❚ Paused" : "● Running") : "○ Idle"}
             </div>
-            <div style={{ fontSize: "9px", marginTop: "3px", opacity: 0.8 }}>⏱ {uptime}</div>
+            <div style={{ fontSize: "9px", marginTop: "2px", opacity: 0.8 }}>⏱ {uptime}</div>
           </div>
         </div>
-
 
         {errorMsg && (
           <div
             style={{
-              marginTop: "10px",
-              padding: "6px 10px",
+              marginTop: "8px",
+              padding: "5px 8px",
               background: "#fbf2c4",
               color: "#c7522a",
               borderRadius: "6px",
-              fontSize: "10px",
+              fontSize: "9px",
               border: "1px solid #e5c185",
             }}
           >
@@ -382,65 +580,42 @@ const Popup = () => {
         )}
       </div>
 
-
       {/* CONTENT */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "12px", display: "flex", flexDirection: "column", gap: "10px" }}>
-        {/* STATS - Compact */}
-        <div style={{ background: "white", borderRadius: "10px", padding: "10px", border: "1px solid #e5e5e5" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path fillRule="evenodd" clipRule="evenodd" d="M3.6 2.25C2.85442 2.25 2.25 2.85441 2.25 3.6V20.4C2.25 21.1456 2.85441 21.75 3.6 21.75H20.4C21.1456 21.75 21.75 21.1456 21.75 20.4V3.6C21.75 2.85442 21.1456 2.25 20.4 2.25H3.6ZM16.75 8C16.75 7.58579 16.4142 7.25 16 7.25C15.5858 7.25 15.25 7.58579 15.25 8V16C15.25 16.4142 15.5858 16.75 16 16.75C16.4142 16.75 16.75 16.4142 16.75 16V8ZM12 10.25C12.4142 10.25 12.75 10.5858 12.75 11V16C12.75 16.4142 12.4142 16.75 12 16.75C11.5858 16.75 11.25 16.4142 11.25 16V11C11.25 10.5858 11.5858 10.25 12 10.25ZM8.75 13C8.75 12.5858 8.41421 12.25 8 12.25C7.58579 12.25 7.25 12.5858 7.25 13V16C7.25 16.4142 7.58579 16.75 8 16.75C8.41421 16.75 8.75 16.4142 8.75 16V13Z" fill="#173a35"/>
-              </svg>
-              <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>Stats</span>
-            </div>
-            <div style={{ fontSize: "8px", color: "#74a892" }}>● Live</div>
+      <div style={{ flex: 1, overflowY: "auto", padding: "8px", display: "flex", flexDirection: "column", gap: "6px" }}>
+        
+        {/* STATS */}
+        <div style={{ background: "white", borderRadius: "8px", padding: "8px", border: "1px solid #e5e5e5" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "4px", marginBottom: "6px" }}>
+            <IconChart size={16} color="#000" />
+            <span style={{ fontSize: "10px", fontWeight: "600", color: "#173a35" }}>Stats</span>
+            <span style={{ fontSize: "7px", color: "#74a892" }}>● Live</span>
           </div>
 
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px", marginBottom: "6px" }}>
-            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
-              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Processed</div>
-              <div style={{ fontSize: "16px", fontWeight: "600", color: "#008585" }}>{stats.chatsProcessed}</div>
-            </div>
-
-
-            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
-              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Replied</div>
-              <div style={{ fontSize: "16px", fontWeight: "600", color: "#74a892" }}>{stats.repliesSent}</div>
-            </div>
-
-
-            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
-              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Leads</div>
-              <div style={{ fontSize: "16px", fontWeight: "600", color: "#c7522a" }}>{stats.leadsFound}</div>
-            </div>
+          <div style={{ 
+            fontSize: "9px", 
+            color: "#173a35", 
+            display: "flex", 
+            flexWrap: "wrap", 
+            justifyContent: "center",
+            alignItems: "center",
+            gap: "10px"
+          }}>
+            <span><strong style={{ color: "#008585" }}>{stats.chatsProcessed}</strong> processed</span>
+            <span><strong style={{ color: "#74a892" }}>{stats.repliesSent}</strong> replied</span>
+            <span><strong style={{ color: "#c7522a" }}>{stats.leadsFound}</strong> leads</span>
+            <span><strong>{storageStats.conversationCount}</strong> convos</span>
+            <span><strong>{storageStats.totalMessages}</strong> msgs</span>
           </div>
 
-          {/* ✅ NEW: Second row with storage stats */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "8px" }}>
-            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
-              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Conversations</div>
-              <div style={{ fontSize: "16px", fontWeight: "600", color: "#173a35" }}>{storageStats.conversationCount}</div>
-            </div>
-
-            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
-              <div style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase", marginBottom: "2px" }}>Messages</div>
-              <div style={{ fontSize: "16px", fontWeight: "600", color: "#173a35" }}>{storageStats.totalMessages}</div>
-            </div>
-          </div>
-
-
-          {/* TOKEN COUNTER */}
           {useGroq && tokenLimit > 0 && (
-            <div style={{ background: "#f8f9fa", padding: "8px", borderRadius: "6px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
-                <span style={{ fontSize: "8px", color: "#6c757d", textTransform: "uppercase" }}>Tokens</span>
-                <span style={{ fontSize: "8px", fontWeight: "600", color: "#173a35" }}>
+            <div style={{ background: "#f8f9fa", padding: "6px", borderRadius: "4px", marginTop: "6px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "2px" }}>
+                <span style={{ fontSize: "7px", color: "#6c757d", textTransform: "uppercase" }}>Tokens</span>
+                <span style={{ fontSize: "7px", fontWeight: "600", color: "#173a35" }}>
                   {stats.tokensUsed.toLocaleString()} / {tokenLimit.toLocaleString()}
                 </span>
               </div>
-              <div style={{ width: "100%", height: "4px", background: "#dee2e6", borderRadius: "2px", overflow: "hidden" }}>
+              <div style={{ width: "100%", height: "3px", background: "#dee2e6", borderRadius: "2px", overflow: "hidden" }}>
                 <div
                   style={{
                     width: `${tokenPercent}%`,
@@ -450,31 +625,20 @@ const Popup = () => {
                   }}
                 />
               </div>
-              <div style={{ fontSize: "7px", color: "#6c757d", marginTop: "2px", textAlign: "right" }}>
-                {tokenPercent}% used
-              </div>
             </div>
           )}
         </div>
 
-
-        {/* CONTROLS - Compact */}
-        <div style={{ background: "white", borderRadius: "10px", padding: "10px", border: "1px solid #e5e5e5" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px" }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18Z" stroke="#173a35" strokeWidth="1.5"/>
-              <path d="M18 12H12M9 6.80273L12 12M12 12L9 17.1973" stroke="#173a35" strokeWidth="1.5"/>
-              <path d="M12 19C15.866 19 19 15.866 19 12C19 8.13401 15.866 5 12 5C8.13401 5 5 8.13401 5 12C5 15.866 8.13401 19 12 19Z" stroke="#173a35" strokeWidth="1.5" strokeDasharray="1 3"/>
-              <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" stroke="#173a35" strokeWidth="1.5"/>
-              <path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" stroke="#173a35" strokeWidth="1.5"/>
-            </svg>
-            <span style={{ fontSize: "11px", fontWeight: "600", color: "#173a35" }}>Controls</span>
+        {/* CONTROLS */}
+        <div style={{ background: "white", borderRadius: "8px", padding: "8px", border: "1px solid #e5e5e5" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "4px", marginBottom: "6px" }}>
+            <IconControls size={16} color="#000" />
+            <span style={{ fontSize: "10px", fontWeight: "600", color: "#173a35" }}>Controls</span>
           </div>
 
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "6px" }}>
             <div>
-              <label style={{ fontSize: "9px", color: "#6c757d", display: "block", marginBottom: "3px" }}>Target chats</label>
+              <label style={{ fontSize: "8px", color: "#6c757d", display: "block", marginBottom: "2px" }}>Target chats</label>
               <input
                 type="number"
                 min={1}
@@ -484,18 +648,17 @@ const Popup = () => {
                 disabled={running}
                 style={{
                   width: "100%",
-                  padding: "6px",
+                  padding: "5px",
                   border: "1px solid #dee2e6",
-                  borderRadius: "5px",
-                  fontSize: "11px",
+                  borderRadius: "4px",
+                  fontSize: "10px",
                   fontFamily: "monospace",
                 }}
               />
             </div>
 
-
             <div>
-              <label style={{ fontSize: "9px", color: "#6c757d", display: "block", marginBottom: "3px" }}>
+              <label style={{ fontSize: "8px", color: "#6c757d", display: "block", marginBottom: "2px" }}>
                 {useGroq ? "Groq Model" : "OpenAI Model"}
               </label>
               {useGroq ? (
@@ -505,31 +668,31 @@ const Popup = () => {
                   disabled={running}
                   style={{
                     width: "100%",
-                    padding: "6px",
+                    padding: "5px",
                     border: "1px solid #dee2e6",
-                    borderRadius: "5px",
-                    fontSize: "10px",
+                    borderRadius: "4px",
+                    fontSize: "9px",
                     background: "white",
                   }}
                 >
-                  <option value="openai/gpt-oss-120b">🧠 GPT-OSS 120B</option>
-                  <option value="llama-3.3-70b-versatile">⚡ Llama 3.3 70B</option>
-                  <option value="meta-llama/llama-4-scout-17b-16e-instruct">🚀 Llama 4 Scout</option>
-                  <option value="meta-llama/llama-4-maverick-17b-128e-instruct">⚖️ Llama 4 Maverick</option>
-                  <option value="moonshotai/kimi-k2-instruct-0905">📚 Kimi K2</option>
-                  <option value="qwen/qwen3-32b">💰 Qwen 3 32B</option>
+                  <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
+                  <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
+                  <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout</option>
+                  <option value="meta-llama/llama-4-maverick-17b-128e-instruct">Llama 4 Maverick</option>
+                  <option value="moonshotai/kimi-k2-instruct-0905">Kimi K2</option>
+                  <option value="qwen/qwen3-32b">Qwen 3 32B</option>
                 </select>
               ) : (
                 <select
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  onChange={(e) => handleModelChange(e.target.value)}
                   disabled={running}
                   style={{
                     width: "100%",
-                    padding: "6px",
+                    padding: "5px",
                     border: "1px solid #dee2e6",
-                    borderRadius: "5px",
-                    fontSize: "11px",
+                    borderRadius: "4px",
+                    fontSize: "10px",
                     background: "white",
                   }}
                 >
@@ -540,115 +703,42 @@ const Popup = () => {
             </div>
           </div>
 
+          {/* TOGGLES */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "4px", marginBottom: "6px" }}>
+            <ToggleRow
+              label="Groq"
+              sublabel={useGroq ? "Fast" : "OpenAI"}
+              enabled={useGroq}
+              disabled={running}
+              onToggle={() => !running && handleUseGroqChange(!useGroq)}
+            />
+            <ToggleRow
+              label="Hours"
+              sublabel={strictHours ? "9-6" : "24/7"}
+              enabled={strictHours}
+              disabled={running}
+              onToggle={() => !running && handleStrictHoursChange(!strictHours)}
+            />
+            <ToggleRow
+              label="Preview"
+              sublabel={replyPreviewEnabled ? "On" : "Off"}
+              enabled={replyPreviewEnabled}
+              disabled={running}
+              onToggle={() => !running && handleReplyPreviewChange(!replyPreviewEnabled)}
+            />
+          </div>
 
-          {/* USE GROQ TOGGLE - COMPACT */}
-          <label
-            onClick={() => !running && handleUseGroqChange(!useGroq)}
-            style={{
-              background: "#f8f9fa",
-              padding: "8px 10px",
-              borderRadius: "6px",
-              marginBottom: "6px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              cursor: running ? "not-allowed" : "pointer",
-              opacity: running ? 0.6 : 1,
-            }}
-          >
-            <div>
-              <div style={{ fontSize: "10px", fontWeight: "500", color: "#173a35" }}>Use Groq</div>
-              <div style={{ fontSize: "7.5px", color: "#6c757d" }}>
-                {useGroq ? "Blazing fast (Groq API)" : "Using OpenAI"}
-              </div>
-            </div>
-            
-            <div
-              style={{
-                width: "38px",
-                height: "20px",
-                background: useGroq ? "#008585" : "#dee2e6",
-                borderRadius: "10px",
-                position: "relative",
-                transition: "background 0.2s",
-              }}
-            >
-              <div
-                style={{
-                  width: "16px",
-                  height: "16px",
-                  background: "white",
-                  borderRadius: "50%",
-                  position: "absolute",
-                  top: "2px",
-                  left: useGroq ? "20px" : "2px",
-                  transition: "left 0.2s",
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-                }}
-              />
-            </div>
-          </label>
-
-
-          {/* STRICT HOURS TOGGLE - COMPACT */}
-          <label
-            onClick={() => !running && handleStrictHoursChange(!strictHours)}
-            style={{
-              background: "#f8f9fa",
-              padding: "8px 10px",
-              borderRadius: "6px",
-              marginBottom: "8px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              cursor: running ? "not-allowed" : "pointer",
-              opacity: running ? 0.6 : 1,
-            }}
-          >
-            <div>
-              <div style={{ fontSize: "10px", fontWeight: "500", color: "#173a35" }}>Strict hours</div>
-              <div style={{ fontSize: "7.5px", color: "#6c757d" }}>
-                {strictHours ? "9 AM - 6 PM only" : "Runs 24/7"}
-              </div>
-            </div>
-            
-            <div
-              style={{
-                width: "38px",
-                height: "20px",
-                background: strictHours ? "#008585" : "#dee2e6",
-                borderRadius: "10px",
-                position: "relative",
-                transition: "background 0.2s",
-              }}
-            >
-              <div
-                style={{
-                  width: "16px",
-                  height: "16px",
-                  background: "white",
-                  borderRadius: "50%",
-                  position: "absolute",
-                  top: "2px",
-                  left: strictHours ? "20px" : "2px",
-                  transition: "left 0.2s",
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-                }}
-              />
-            </div>
-          </label>
-
-
-          <div style={{ display: "flex", gap: "6px" }}>
+          {/* ACTION BUTTONS */}
+          <div style={{ display: "flex", gap: "4px" }}>
             <button
               onClick={openOptionsPage}
               style={{
                 flex: 1,
-                padding: "8px",
+                padding: "7px",
                 background: "#e5c185",
                 border: "none",
-                borderRadius: "6px",
-                fontSize: "11px",
+                borderRadius: "5px",
+                fontSize: "10px",
                 fontWeight: "500",
                 color: "#173a35",
                 cursor: "pointer",
@@ -657,171 +747,199 @@ const Popup = () => {
               Settings
             </button>
 
-
-            <button
-              onClick={handleStart}
-              disabled={running || !!errorMsg}
-              style={{
-                flex: 1,
-                padding: "8px",
-                background: running || errorMsg ? "#dee2e6" : "#008585",
-                border: "none",
-                borderRadius: "6px",
-                fontSize: "11px",
-                fontWeight: "500",
-                color: "white",
-                cursor: running || errorMsg ? "not-allowed" : "pointer",
-              }}
-            >
-              ▶ Start
-            </button>
-
-
-            <button
-              onClick={handleStop}
-              disabled={!running}
-              style={{
-                flex: 1,
-                padding: "8px",
-                background: !running ? "#dee2e6" : "#c7522a",
-                border: "none",
-                borderRadius: "6px",
-                fontSize: "11px",
-                fontWeight: "500",
-                color: "white",
-                cursor: !running ? "not-allowed" : "pointer",
-              }}
-            >
-              ■ Stop
-            </button>
+            {!running ? (
+              <button
+                onClick={handleStart}
+                disabled={!!errorMsg}
+                style={{
+                  flex: 2,
+                  padding: "7px",
+                  background: errorMsg ? "#dee2e6" : "#008585",
+                  border: "none",
+                  borderRadius: "5px",
+                  fontSize: "10px",
+                  fontWeight: "500",
+                  color: "white",
+                  cursor: errorMsg ? "not-allowed" : "pointer",
+                }}
+              >
+                ▶ Start
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={paused ? handleResume : handlePause}
+                  style={{
+                    flex: 1,
+                    padding: "7px",
+                    background: paused ? "#74a892" : "#e5c185",
+                    border: "none",
+                    borderRadius: "5px",
+                    fontSize: "10px",
+                    fontWeight: "500",
+                    color: paused ? "white" : "#173a35",
+                    cursor: "pointer",
+                  }}
+                >
+                  {paused ? "▶" : "❚❚"}
+                </button>
+                <button
+                  onClick={handleStop}
+                  style={{
+                    flex: 1,
+                    padding: "7px",
+                    background: "#c7522a",
+                    border: "none",
+                    borderRadius: "5px",
+                    fontSize: "10px",
+                    fontWeight: "500",
+                    color: "white",
+                    cursor: "pointer",
+                  }}
+                >
+                  ■ Stop
+                </button>
+              </>
+            )}
           </div>
 
-          {/* ✅ NEW: Clear Storage Button */}
-          {storageStats.conversationCount > 0 && (
+          {/* UTILITY BUTTONS */}
+          <div style={{ display: "flex", gap: "4px", marginTop: "4px" }}>
             <button
-              onClick={handleClearStorage}
-              disabled={running}
+              onClick={handleExportConversations}
+              disabled={running || storageStats.conversationCount === 0}
               style={{
-                width: "100%",
-                marginTop: "6px",
-                padding: "6px",
-                background: running ? "#dee2e6" : "#f8f9fa",
+                flex: 1,
+                padding: "5px",
+                background: "#f8f9fa",
                 border: "1px solid #dee2e6",
-                borderRadius: "6px",
-                fontSize: "9px",
-                fontWeight: "500",
-                color: running ? "#6c757d" : "#c7522a",
-                cursor: running ? "not-allowed" : "pointer",
+                borderRadius: "4px",
+                fontSize: "8px",
+                color: running || storageStats.conversationCount === 0 ? "#adb5bd" : "#000",
+                cursor: running || storageStats.conversationCount === 0 ? "not-allowed" : "pointer",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 gap: "4px",
               }}
             >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-              </svg>
-              Clear {storageStats.conversationCount} conversation{storageStats.conversationCount !== 1 ? 's' : ''}
+              <IconExport size={14} color={running || storageStats.conversationCount === 0 ? "#adb5bd" : "#000"} />
+              Export
             </button>
-          )}
+            <button
+              onClick={handleClearStorage}
+              disabled={running || storageStats.conversationCount === 0}
+              style={{
+                flex: 1,
+                padding: "5px",
+                background: "#f8f9fa",
+                border: "1px solid #dee2e6",
+                borderRadius: "4px",
+                fontSize: "8px",
+                color: running || storageStats.conversationCount === 0 ? "#adb5bd" : "#000",
+                cursor: running || storageStats.conversationCount === 0 ? "not-allowed" : "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "4px",
+              }}
+            >
+              <IconDelete size={14} color={running || storageStats.conversationCount === 0 ? "#adb5bd" : "#000"} />
+              Clear ({storageStats.conversationCount})
+            </button>
+          </div>
         </div>
 
-
-        {/* TERMINAL - Expanded and Taller */}
-        <div style={{ background: "#1a1f1e", borderRadius: "10px", overflow: "hidden", border: "1px solid #2a2f2e", flex: 1, display: "flex", flexDirection: "column" }}>
+        {/* TERMINAL */}
+        <div
+          className="terminal-wrapper"
+          style={{
+            background: "#1a1f1e",
+            borderRadius: "8px",
+            overflow: "hidden",
+            border: "1px solid #2a2f2e",
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            minHeight: "160px",
+          }}
+        >
           <div
             style={{
-              padding: "8px 12px",
+              padding: "6px 10px",
               borderBottom: "1px solid rgba(255,255,255,0.1)",
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path fillRule="evenodd" clipRule="evenodd" d="M12 1.25C6.06294 1.25 1.25 6.06294 1.25 12C1.25 13.8563 1.72113 15.6046 2.55076 17.1298L1.76267 21.3627C1.71742 21.6058 1.79485 21.8555 1.96967 22.0303C2.14448 22.2051 2.39422 22.2826 2.63727 22.2373L6.87016 21.4493C8.39536 22.2788 10.1437 22.75 12 22.75C17.937 22.75 22.75 17.937 22.75 12C22.75 6.06293 17.937 1.25 12 1.25ZM17 10.75C16.3097 10.75 15.75 11.3097 15.75 12C15.75 12.6903 16.3097 13.25 17 13.25C17.6903 13.25 18.25 12.6903 18.25 12C18.25 11.3097 17.6903 10.75 17 10.75ZM10.75 12C10.75 11.3097 11.3097 10.75 12 10.75C12.6903 10.75 13.25 11.3097 13.25 12C13.25 12.6903 12.6903 13.25 12 13.25C11.3097 13.25 10.75 12.6903 10.75 12ZM7 10.75C6.30961 10.75 5.75 11.3097 5.75 12C5.75 12.6903 6.30961 13.25 7 13.25C7.69039 13.25 8.25 12.6903 8.25 12C8.25 11.3097 7.69039 10.75 7 10.75Z" fill="#74a892"/>
-              </svg>
-              <span style={{ fontSize: "10px", color: "#74a892", fontWeight: "600" }}>Live terminal</span>
+            <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+              <IconTerminal size={14} color="#74a892" />
+              <span style={{ fontSize: "9px", color: "#74a892", fontWeight: "600" }}>Live Terminal</span>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
               <button
                 onClick={handleCopyLogs}
                 disabled={logs.length === 0}
                 style={{
-                  padding: "4px 8px",
+                  padding: "3px 6px",
                   background: copied ? "#74a892" : "rgba(255,255,255,0.1)",
                   border: "1px solid rgba(255,255,255,0.2)",
-                  borderRadius: "4px",
-                  fontSize: "9px",
+                  borderRadius: "3px",
+                  fontSize: "8px",
                   color: "#fbf2c4",
                   cursor: logs.length === 0 ? "not-allowed" : "pointer",
                   opacity: logs.length === 0 ? 0.5 : 1,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "4px",
                 }}
               >
-                {copied ? (
-                  <>
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M5 13l4 4L19 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    Copied
-                  </>
-                ) : (
-                  <>
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" strokeWidth="2"/>
-                      <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" stroke="currentColor" strokeWidth="2"/>
-                    </svg>
-                    Copy
-                  </>
-                )}
+                {copied ? "✓" : "Copy"}
               </button>
-              <div style={{ fontSize: "8px", color: "#6c757d" }}>{logs.length} events</div>
+              <span style={{ fontSize: "7px", color: "#6c757d" }}>{logs.length}</span>
             </div>
           </div>
 
-
           <div
+            ref={logContainerRef}
             className="log-container"
             style={{
               flex: 1,
               overflowY: "auto",
-              padding: "10px",
+              padding: "8px",
               fontFamily: "monospace",
-              fontSize: "10px",
-              lineHeight: "1.5",
+              fontSize: "9px",
+              lineHeight: "1.4",
               color: "#fbf2c4",
             }}
           >
             {logs.length === 0 && <div style={{ opacity: 0.5, fontStyle: "italic" }}>Ready.</div>}
             {logs.map((log, i) => {
-              // ✅ Detect special log types
-              const isDoubleText = log.message.includes('Double-texting') || log.message.includes('double-text');
-              const isProfileLog = log.message.includes('(') && log.message.includes('@');
-              const isStorageLog = log.message.includes('Saved') && log.message.includes('messages');
-              
+              const isDoubleText = log.message.includes("Double-texting") || log.message.includes("double-text");
+              const isProfileLog = log.message.includes("(") && log.message.includes("@");
+              const isStorageLog = log.message.includes("Saved") && log.message.includes("messages");
+
               return (
-                <div key={i} style={{ display: "flex", gap: "8px", marginBottom: "3px" }}>
-                  <span style={{ opacity: 0.6, minWidth: "65px" }}>
+                <div key={i} style={{ display: "flex", gap: "6px", marginBottom: "2px" }}>
+                  <span style={{ opacity: 0.5, minWidth: "55px", fontSize: "8px" }}>
                     {new Date(log.time).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                   </span>
                   <span
                     style={{
-                      opacity: 0.8,
-                      minWidth: "50px",
+                      opacity: 0.7,
+                      minWidth: "35px",
+                      fontSize: "8px",
                       color: log.actor === "Bot" ? "#74a892" : log.actor === "User" ? "#e5c185" : "#fbf2c4",
                     }}
                   >
                     {log.actor}
                   </span>
-                  <span style={{ 
-                    opacity: log.type === "ERROR" ? 1 : 0.9, 
-                    color: log.type === "ERROR" ? "#c7522a" : isDoubleText ? "#e5c185" : "inherit",
-                    fontWeight: isDoubleText || isStorageLog ? "600" : "normal"
-                  }}>
+                  <span
+                    style={{
+                      opacity: log.type === "ERROR" ? 1 : 0.85,
+                      color: log.type === "ERROR" ? "#c7522a" : isDoubleText ? "#e5c185" : "inherit",
+                      fontWeight: isDoubleText || isStorageLog ? "600" : "normal",
+                      fontSize: "8px",
+                    }}
+                  >
                     {isDoubleText && "💬 "}
                     {isProfileLog && "👤 "}
                     {isStorageLog && "💾 "}
@@ -833,15 +951,129 @@ const Popup = () => {
           </div>
         </div>
 
-
-        <div style={{ textAlign: "center", fontSize: "8px", color: "#6c757d", marginTop: "2px" }}>
-          v2.4.0 • linkedIn autoresponder
-        </div>
+        <div style={{ textAlign: "center", fontSize: "7px", color: "#6c757d" }}>v2.6.0 • LinkedIn Autoresponder</div>
       </div>
     </div>
   );
 };
 
+// --- ICON COMPONENTS ---
+
+function IconChart({ size = 16, color = "#000" }: { size?: number; color?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path 
+        fill={color} 
+        d="M13 3a2 2 0 0 1 1.995 1.85L15 5v16H9V5a2 2 0 0 1 1.85-1.995L11 3zm7 5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3V8zM7 11v10H4a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z"
+      />
+    </svg>
+  );
+}
+
+function IconControls({ size = 16, color = "#000" }: { size?: number; color?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path 
+        fill={color} 
+        d="M16 15c1.306 0 2.418.835 2.83 2H20a1 1 0 1 1 0 2h-1.17a3.001 3.001 0 0 1-5.66 0H4a1 1 0 1 1 0-2h9.17A3.001 3.001 0 0 1 16 15M8 9a3 3 0 0 1 2.762 1.828l.067.172H20a1 1 0 0 1 .117 1.993L20 13h-9.17a3.001 3.001 0 0 1-5.592.172L5.17 13H4a1 1 0 0 1-.117-1.993L4 11h1.17A3.001 3.001 0 0 1 8 9m8-6c1.306 0 2.418.835 2.83 2H20a1 1 0 1 1 0 2h-1.17a3.001 3.001 0 0 1-5.66 0H4a1 1 0 0 1 0-2h9.17A3.001 3.001 0 0 1 16 3"
+      />
+    </svg>
+  );
+}
+
+function IconTerminal({ size = 16, color = "#000" }: { size?: number; color?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path 
+        fill={color} 
+        fillRule="evenodd"
+        d="M19 3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm-3 11h-2a1 1 0 1 0 0 2h2a1 1 0 1 0 0-2M9.05 8.465a1 1 0 0 0-1.497 1.32l.083.094L9.757 12l-2.12 2.121a1 1 0 0 0 1.32 1.498l.093-.083 2.829-2.829a1 1 0 0 0 .083-1.32l-.083-.094z"
+      />
+    </svg>
+  );
+}
+
+function IconExport({ size = 14, color = "#000" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
+      <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2v9.67z"/>
+    </svg>
+  );
+}
+
+function IconDelete({ size = 14, color = "#000" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
+      <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+    </svg>
+  );
+}
+
+// --- HELPER COMPONENTS ---
+
+function ToggleRow(props: {
+  label: string;
+  sublabel: string;
+  enabled: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      onClick={props.onToggle}
+      style={{
+        background: "#f8f9fa",
+        padding: "5px 6px",
+        borderRadius: "4px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        cursor: props.disabled ? "not-allowed" : "pointer",
+        opacity: props.disabled ? 0.6 : 1,
+      }}
+    >
+      <div>
+        <div style={{ fontSize: "8px", fontWeight: "500", color: "#173a35" }}>{props.label}</div>
+        <div style={{ fontSize: "6px", color: "#6c757d" }}>{props.sublabel}</div>
+      </div>
+      <div
+        style={{
+          width: "24px",
+          height: "12px",
+          background: props.enabled ? "#008585" : "#dee2e6",
+          borderRadius: "6px",
+          position: "relative",
+          transition: "background 0.2s",
+        }}
+      >
+        <div
+          style={{
+            width: "8px",
+            height: "8px",
+            background: "white",
+            borderRadius: "50%",
+            position: "absolute",
+            top: "2px",
+            left: props.enabled ? "14px" : "2px",
+            transition: "left 0.2s",
+            boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SummaryRow(props: { label: string; value: string | number; valueColor: string; small?: boolean }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
+      <span style={{ fontSize: "11px", color: "#6c757d" }}>{props.label}:</span>
+      <span style={{ fontSize: props.small ? "10px" : "11px", fontWeight: "600", color: props.valueColor }}>{props.value}</span>
+    </div>
+  );
+}
+
+// --- RENDER ---
 
 const root = createRoot(document.getElementById("popup-root")!);
 root.render(<Popup />);

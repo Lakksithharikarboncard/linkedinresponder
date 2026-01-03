@@ -1,41 +1,48 @@
+// linkedinresponder/src/content/content.ts
+
 import { BotCommand, BotLogEntry, BotStats, BotStatus, MessageEntry, ConversationHistory } from "../shared/types";
 import { checkPositiveLead, sendLeadAlertEmail, shouldReplyToConversation } from "../shared/sendEmail";
-import { 
-  generateLeadId, 
-  loadConversation, 
-  saveConversation, 
-  shouldResync 
-} from "../shared/conversationStorage";
-import { 
-  scrapeLeadProfile, 
-  formatProfileForDisplay, 
-  formatProfileForAI 
-} from "../shared/profileScraper";
-import { 
-  shouldDoubleText, 
-  generateDoubleText, 
-  calculateDoubleTextDelay 
-} from "../shared/doubleTextHandler";
+import { generateLeadId, loadConversation, saveConversation, shouldResync } from "../shared/conversationStorage";
+import { scrapeLeadProfile, formatProfileForDisplay, formatProfileForAI } from "../shared/profileScraper";
+import { shouldDoubleText, generateDoubleText, calculateDoubleTextDelay } from "../shared/doubleTextHandler";
+import { getBotSettings } from "../shared/settings";
 
 type ContentCommand =
   | BotCommand
   | { type: "PING_TEST" }
-  | { type: "CHECK_UNREAD" };
+  | { type: "CHECK_UNREAD" }
+  | { type: "PAUSE_BOT" }
+  | { type: "RESUME_BOT" }
+  | { type: "APPROVE_REPLY"; reply: string; leadName: string }
+  | { type: "REJECT_REPLY"; leadName: string };
 
 // --- STATE VARIABLES ---
 let botRunning = false;
+let botPaused = false; // ✅ NEW: Pause state
 let botLoopTimeout: number | null = null;
-let stats: BotStats = { chatsProcessed: 0, repliesSent: 0, leadsFound: 0, startTime: null, tokensUsed: 0, currentModel: "" };
+let stats: BotStats = {
+  chatsProcessed: 0,
+  repliesSent: 0,
+  leadsFound: 0,
+  startTime: null,
+  tokensUsed: 0,
+  currentModel: "",
+};
 let logs: BotLogEntry[] = [];
 let useStrictHours = true;
 let useGroq = false;
 let groqModel = "llama-3.3-70b-versatile";
 
+// ✅ NEW: Reply preview state
+let replyPreviewEnabled = false;
+let pendingReplyResolve: ((approved: { approved: boolean; reply: string }) => void) | null = null;
+let blacklist: string[] = [];
+
 // --- HELPER FUNCTIONS FOR CONTEXT-AWARE PROMPTING ---
 function getTimeContext(): string {
   const hour = new Date().getHours();
   const day = new Date().getDay();
-  
+
   if (day === 0 || day === 6) return "Weekend - keep it casual and light";
   if (hour < 12) return "Morning - people are busy, be concise";
   if (hour < 17) return "Afternoon - normal business hours";
@@ -44,10 +51,10 @@ function getTimeContext(): string {
 
 function getConversationAge(messages: MessageEntry[]): string {
   if (messages.length < 2) return "First exchange - establish rapport";
-  
+
   const firstMsg = messages[0].timestamp;
   const daysSince = Math.floor((Date.now() - firstMsg) / (1000 * 60 * 60 * 24));
-  
+
   if (daysSince === 0) return "New conversation today";
   if (daysSince === 1) return "Ongoing conversation";
   if (daysSince > 7) return "Old conversation - re-engage carefully";
@@ -55,11 +62,12 @@ function getConversationAge(messages: MessageEntry[]): string {
 }
 
 function getResponsePattern(messages: MessageEntry[]): string {
-  const theirMessages = messages.filter(m => m.type === 'received');
+  const theirMessages = messages.filter((m) => m.type === "received");
   if (theirMessages.length === 0) return "Unknown";
-  
-  const avgLength = theirMessages.reduce((sum, m) => sum + m.content.split(' ').length, 0) / theirMessages.length;
-  
+
+  const avgLength =
+    theirMessages.reduce((sum, m) => sum + m.content.split(" ").length, 0) / theirMessages.length;
+
   if (avgLength < 10) return "SHORT replies (5-10 words) - match that brevity";
   if (avgLength < 25) return "MEDIUM replies (10-25 words) - similar length";
   return "LONG replies (25+ words) - you can elaborate more";
@@ -67,26 +75,30 @@ function getResponsePattern(messages: MessageEntry[]): string {
 
 function getToneGuidance(profile: any): string {
   if (!profile || !profile.jobTitle) return "Professional but friendly";
-  
+
   const title = profile.jobTitle.toLowerCase();
-  
-  if (title.includes('ceo') || title.includes('founder') || title.includes('president')) {
+
+  if (title.includes("ceo") || title.includes("founder") || title.includes("president")) {
     return "EXECUTIVE - Be direct, concise, value-focused. No fluff.";
   }
-  
-  if (title.includes('director') || title.includes('vp') || title.includes('head')) {
+
+  if (title.includes("director") || title.includes("vp") || title.includes("head")) {
     return "SENIOR LEADER - Professional, strategic. Focus on ROI.";
   }
-  
-  if (title.includes('engineer') || title.includes('developer')) {
+
+  if (title.includes("engineer") || title.includes("developer")) {
     return "TECHNICAL - Be specific, mention features. Avoid sales speak.";
   }
-  
+
   return "PROFESSIONAL - Warm, helpful, consultative.";
 }
 
 // --- LOGGING & STATS HELPERS ---
-function addLog(type: "INFO" | "ACTION" | "ERROR" | "SUCCESS" | "WARNING", message: string, actor: "User" | "Bot" | "System") {
+function addLog(
+  type: "INFO" | "ACTION" | "ERROR" | "SUCCESS" | "WARNING",
+  message: string,
+  actor: "User" | "Bot" | "System"
+) {
   const entry: BotLogEntry = { time: Date.now(), type, message, actor };
   logs.unshift(entry);
   if (logs.length > 100) logs.pop();
@@ -94,14 +106,13 @@ function addLog(type: "INFO" | "ACTION" | "ERROR" | "SUCCESS" | "WARNING", messa
 }
 
 function updateStats(key: keyof BotStats, value: number | string) {
-  if (key === 'startTime') {
-      stats.startTime = value as number;
-  } else if (key === 'tokensUsed') {
-      stats.tokensUsed = value as number;
-  } else if (key === 'currentModel') {
-      stats.currentModel = value as string;
+  if (key === "startTime") {
+    stats.startTime = value as number;
+  } else if (key === "currentModel") {
+    stats.currentModel = value as string;
   } else {
-      (stats[key] as number) += value as number;
+    // ✅ FIX: All numeric stats now consistently ADD
+    (stats[key] as number) += value as number;
   }
 }
 
@@ -112,9 +123,9 @@ function delay(ms: number) {
 
 function calculateTypingDelay(text: string): number {
   const words = text.split(" ").length;
-  const baseDelay = 2000; 
-  const msPerWord = 300;  
-  return baseDelay + (words * msPerWord) + (Math.random() * 2000);
+  const baseDelay = 2000;
+  const msPerWord = 300;
+  return baseDelay + words * msPerWord + Math.random() * 2000;
 }
 
 function isWithinWorkingHours(startHour: number = 9, endHour: number = 18): boolean {
@@ -126,10 +137,10 @@ async function humanType(input: HTMLElement, text: string) {
   input.focus();
   document.execCommand("selectAll", false, "");
   document.execCommand("delete", false, "");
-  
+
   for (const char of text) {
     document.execCommand("insertText", false, char);
-    const charDelay = Math.random() > 0.9 ? 150 : 30 + Math.random() * 50; 
+    const charDelay = Math.random() > 0.9 ? 150 : 30 + Math.random() * 50;
     await delay(charDelay);
   }
 }
@@ -145,13 +156,13 @@ async function humanScroll() {
 }
 
 async function scrollConversationList(times: number = 5) {
-  const container = document.querySelector<HTMLElement>('.msg-conversations-container--inbox-shortcuts');
+  const container = document.querySelector<HTMLElement>(".msg-conversations-container--inbox-shortcuts");
   if (!container) return;
 
   for (let i = 0; i < times; i++) {
-    container.scrollBy({ top: Math.random() * 200 + 100, behavior: 'smooth' });
+    container.scrollBy({ top: Math.random() * 200 + 100, behavior: "smooth" });
     await delay(500 + Math.random() * 800);
-    container.scrollBy({ top: -(Math.random() * 50), behavior: 'smooth' });
+    container.scrollBy({ top: -(Math.random() * 50), behavior: "smooth" });
     await delay(400 + Math.random() * 500);
   }
 }
@@ -169,37 +180,20 @@ async function getSettings(): Promise<{
   startHour: number;
   endHour: number;
 }> {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(
-      [
-        "openaiApiKey",
-        "groqApiKey",
-        "chatMinDelay",
-        "chatMaxDelay",
-        "loopMinDelay",
-        "loopMaxDelay",
-        "replyPrompt",
-        "leadPrompt",
-        "targetEmail",
-        "startHour",
-        "endHour"
-      ],
-      (res) =>
-        resolve({
-          apiKey: res.openaiApiKey,
-          groqApiKey: res.groqApiKey || "",
-          chatMin: res.chatMinDelay || 1000,
-          chatMax: res.chatMaxDelay || 2500,
-          loopMin: res.loopMinDelay || 3000,
-          loopMax: res.loopMaxDelay || 6000,
-          prompt: res.replyPrompt || "Reply briefly:",
-          leadPrompt: res.leadPrompt || "Interested lead",
-          targetEmail: res.targetEmail || "",
-          startHour: res.startHour || 9,
-          endHour: res.endHour || 18,
-        })
-    );
-  });
+  const s = await getBotSettings();
+  return {
+    apiKey: s.openaiApiKey,
+    groqApiKey: s.groqApiKey,
+    chatMin: s.chatMinDelay,
+    chatMax: s.chatMaxDelay,
+    loopMin: s.loopMinDelay,
+    loopMax: s.loopMaxDelay,
+    prompt: s.replyPrompt,
+    leadPrompt: s.leadPrompt,
+    targetEmail: s.targetEmail,
+    startHour: s.startHour,
+    endHour: s.endHour,
+  };
 }
 
 function getLeadName(): string | null {
@@ -247,7 +241,7 @@ async function scrollToLoadAllMessages() {
 
   while (currentHeight > previousHeight && attempts < maxAttempts) {
     previousHeight = currentHeight;
-    messagePane.scrollTo({ top: 0, behavior: 'smooth' });
+    messagePane.scrollTo({ top: 0, behavior: "smooth" });
     await delay(800 + Math.random() * 400);
     currentHeight = messagePane.scrollHeight;
     attempts++;
@@ -270,7 +264,7 @@ async function getCompleteConversation(leadName: string): Promise<MessageEntry[]
     if (senderEl && contentEl) {
       const speaker = senderEl.textContent?.trim() || "Unknown";
       const content = contentEl.textContent?.trim() || "";
-      
+
       let timestamp = Date.now();
       if (timeEl) {
         const dateTimeAttr = timeEl.getAttribute("datetime");
@@ -279,7 +273,7 @@ async function getCompleteConversation(leadName: string): Promise<MessageEntry[]
         }
       }
 
-      const type = speaker.includes(leadName) ? 'received' : 'sent';
+      const type = speaker.includes(leadName) ? "received" : "sent";
 
       if (content) {
         messages.push({ speaker, content, timestamp, type });
@@ -297,13 +291,17 @@ async function getOrCreateConversationHistory(leadName: string): Promise<Convers
   let existingConvo = await loadConversation(leadId);
 
   if (existingConvo && !shouldResync(existingConvo)) {
-    addLog("INFO", `Using cached data for ${formatProfileForDisplay(leadName, existingConvo.profile)} (${existingConvo.messages.length} msgs)`, "System");
+    addLog(
+      "INFO",
+      `Using cached data for ${formatProfileForDisplay(leadName, existingConvo.profile)} (${existingConvo.messages.length} msgs)`,
+      "System"
+    );
     return existingConvo;
   }
 
   addLog("INFO", `Scraping profile for ${leadName}...`, "System");
   const profileData = scrapeLeadProfile();
-  
+
   addLog("INFO", `Syncing full history for ${leadName}...`, "System");
   const freshMessages = await getCompleteConversation(leadName);
 
@@ -317,36 +315,36 @@ async function getOrCreateConversationHistory(leadName: string): Promise<Convers
     metadata: {
       firstContact: freshMessages[0]?.timestamp || Date.now(),
       lastActivity: lastMsg?.timestamp || Date.now(),
-      lastMessageFrom: lastMsg?.type === 'received' ? 'lead' : 'me',
+      lastMessageFrom: lastMsg?.type === "received" ? "lead" : "me",
       totalMessages: freshMessages.length,
-      lastSyncedAt: Date.now()
-    }
+      lastSyncedAt: Date.now(),
+    },
   };
 
   await saveConversation(conversation);
-  addLog("SUCCESS", `Saved ${freshMessages.length} messages + profile for ${formatProfileForDisplay(leadName, profileData)}`, "System");
+  addLog(
+    "SUCCESS",
+    `Saved ${freshMessages.length} messages + profile for ${formatProfileForDisplay(leadName, profileData)}`,
+    "System"
+  );
 
   return conversation;
 }
 
 async function fetchReply(
-  apiKey: string, 
-  prompt: string, 
-  fullHistory: MessageEntry[], 
-  leadName: string, 
+  apiKey: string,
+  prompt: string,
+  fullHistory: MessageEntry[],
+  leadName: string,
   myName: string,
   leadProfile: any,
-  useGroqAPI: boolean = false, 
+  useGroqAPI: boolean = false,
   groqModelName: string = "llama-3.3-70b-versatile"
 ): Promise<{ reply: string; tokensUsed: number }> {
-  
   const recentMessages = fullHistory.slice(-30);
-  
-  const conversationText = recentMessages
-    .map(msg => `${msg.speaker}: ${msg.content}`)
-    .join("\n");
 
-  // ✅ Context-aware prompt system
+  const conversationText = recentMessages.map((msg) => `${msg.speaker}: ${msg.content}`).join("\n");
+
   const timeContext = getTimeContext();
   const conversationAge = getConversationAge(fullHistory);
   const responsePattern = getResponsePattern(fullHistory);
@@ -380,10 +378,9 @@ CRITICAL REALISM RULES:
 
 Respond as ${myName}. Type like you're between meetings.`;
 
-  const apiUrl = useGroqAPI 
+  const apiUrl = useGroqAPI
     ? "https://api.groq.com/openai/v1/chat/completions"
     : "https://api.openai.com/v1/chat/completions";
-
   const model = useGroqAPI ? groqModelName : "gpt-4o-mini";
 
   let maxTokens = 150;
@@ -403,11 +400,11 @@ Respond as ${myName}. Type like you're between meetings.`;
     body: JSON.stringify({
       model: model,
       messages: [
-          { role: "system", content: systemPrompt },
-          ...recentMessages.map(msg => ({
-              role: msg.type === 'received' ? "user" : "assistant",
-              content: msg.content
-          }))
+        { role: "system", content: systemPrompt },
+        ...recentMessages.map((msg) => ({
+          role: msg.type === "received" ? "user" : "assistant",
+          content: msg.content,
+        })),
       ],
       max_tokens: maxTokens,
       temperature: 0.7,
@@ -416,17 +413,17 @@ Respond as ${myName}. Type like you're between meetings.`;
 
   if (!response.ok) throw new Error(`${useGroqAPI ? "Groq" : "OpenAI"} API Error`);
   const data = await response.json();
-  
+
   const tokensUsed = (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0);
-  
-  return { 
+
+  return {
     reply: data.choices[0].message.content.trim(),
-    tokensUsed 
+    tokensUsed,
   };
 }
 
 function getMyName(): string {
-  const nameEl = document.querySelector('.global-nav__me-content span') as HTMLElement;
+  const nameEl = document.querySelector(".global-nav__me-content span") as HTMLElement;
   return nameEl?.textContent?.trim() || "You";
 }
 
@@ -444,19 +441,72 @@ function getModelDisplayName(modelId: string): string {
   return modelNames[modelId] || modelId;
 }
 
+// ✅ NEW: Check if lead is blacklisted
+function isBlacklisted(leadName: string, profile: any): boolean {
+  const checkStrings = [
+    leadName.toLowerCase(),
+    profile?.company?.toLowerCase() || "",
+    profile?.jobTitle?.toLowerCase() || "",
+  ];
+
+  for (const entry of blacklist) {
+    const entryLower = entry.toLowerCase();
+    for (const check of checkStrings) {
+      if (check && check.includes(entryLower)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// ✅ NEW: Wait for reply approval from popup
+async function waitForReplyApproval(leadName: string, reply: string): Promise<{ approved: boolean; reply: string }> {
+  return new Promise((resolve) => {
+    // Store the resolve function so it can be called from message handler
+    pendingReplyResolve = resolve;
+
+    // Store pending reply in storage for popup to access
+    chrome.storage.local.set({
+      pendingReply: {
+        leadName,
+        reply,
+        timestamp: Date.now(),
+      },
+    });
+
+    addLog("INFO", `Waiting for approval to reply to ${leadName}...`, "System");
+
+    // Timeout after 5 minutes - auto-reject
+    setTimeout(() => {
+      if (pendingReplyResolve) {
+        addLog("WARNING", `Reply approval timed out for ${leadName}`, "System");
+        pendingReplyResolve({ approved: false, reply: "" });
+        pendingReplyResolve = null;
+        chrome.storage.local.remove(["pendingReply"]);
+      }
+    }, 5 * 60 * 1000);
+  });
+}
+
 // --- MAIN LOOP ---
 async function runIteration(n: number) {
   addLog("INFO", `Starting batch of ${n} chats...`, "System");
-  
-  const { apiKey, groqApiKey, chatMin, chatMax, loopMin, loopMax, prompt, leadPrompt, targetEmail, startHour, endHour } = await getSettings();
-  
+
+  const { apiKey, groqApiKey, chatMin, chatMax, loopMin, loopMax, prompt, leadPrompt, targetEmail, startHour, endHour } =
+    await getSettings();
+
   const activeApiKey = useGroq ? groqApiKey : apiKey;
   const currentModelName = useGroq ? groqModel : "gpt-4o-mini";
   updateStats("currentModel", getModelDisplayName(currentModelName));
-  
+
+  // ✅ Load blacklist from storage
+  const storageData = await chrome.storage.local.get(["blacklist"]);
+  blacklist = storageData.blacklist || [];
+
   if (useStrictHours && !isWithinWorkingHours(startHour, endHour)) {
     addLog("WARNING", `Outside working hours (${startHour}-${endHour}). Pausing.`, "System");
-    if (botRunning) {
+    if (botRunning && !botPaused) {
       botLoopTimeout = window.setTimeout(() => runIteration(n), 15 * 60 * 1000);
     }
     return;
@@ -464,19 +514,26 @@ async function runIteration(n: number) {
 
   const myName = getMyName();
   await scrollConversationList(5);
-  
+
   let chats = Array.from(document.querySelectorAll("ul.msg-conversations-container__conversations-list li"))
     .slice(0, n)
     .sort(() => Math.random() - 0.2);
-  
+
   addLog("INFO", `Found ${chats.length} conversations to check.`, "Bot");
 
   for (let i = 0; i < chats.length && botRunning; i++) {
+    // ✅ NEW: Check if paused
+    while (botPaused && botRunning) {
+      await delay(1000);
+    }
+
+    if (!botRunning) break;
+
     await humanScroll();
     await randomDelay(chatMin, chatMax);
     const clickable = chats[i].querySelector<HTMLElement>("a, .msg-conversation-listitem__link, [tabindex='0']");
     clickable?.click();
-    
+
     await delay(2000);
 
     const leadName = getLeadName();
@@ -484,28 +541,36 @@ async function runIteration(n: number) {
 
     const lastMsg = getLastMessage(leadName);
     if (!lastMsg || !lastMsg.fromLead) {
-        addLog("INFO", `Skipping ${leadName}: Last message was from me.`, "Bot");
-        continue;
+      addLog("INFO", `Skipping ${leadName}: Last message was from me.`, "Bot");
+      continue;
     }
 
     const fullConversation = await getOrCreateConversationHistory(leadName);
-    
+
+    // ✅ NEW: Check blacklist
+    if (isBlacklisted(leadName, fullConversation.profile)) {
+      addLog("WARNING", `Skipping ${leadName}: Blacklisted`, "Bot");
+      continue;
+    }
+
     addLog("INFO", `Checking chat with ${formatProfileForDisplay(leadName, fullConversation.profile)}...`, "Bot");
     updateStats("chatsProcessed", 1);
-    
+
     if (fullConversation.messages.length === 0) {
       addLog("WARNING", `No messages found for ${leadName}`, "System");
       continue;
     }
 
-    const recentForDecision = fullConversation.messages
-      .slice(-8)
-      .map(m => ({ speaker: m.speaker, message: m.content }));
+    const recentForDecision = fullConversation.messages.slice(-8).map((m) => ({ speaker: m.speaker, message: m.content }));
 
     let decision;
     try {
       decision = await shouldReplyToConversation(activeApiKey, recentForDecision, leadName);
-      addLog("ACTION", `AI Decision for ${leadName}: ${decision.shouldReply ? "REPLY" : "SKIP"} (${decision.reason})`, "Bot");
+      addLog(
+        "ACTION",
+        `AI Decision for ${leadName}: ${decision.shouldReply ? "REPLY" : "SKIP"} (${decision.reason})`,
+        "Bot"
+      );
     } catch (e) {
       addLog("ERROR", `AI Decision Failed: ${getErrorMsg(e)}`, "System");
       continue;
@@ -514,143 +579,156 @@ async function runIteration(n: number) {
     if (!decision.shouldReply) continue;
 
     if (targetEmail) {
-        try {
-            const recentMsgs = fullConversation.messages.slice(-2).map(m => m.content);
-            const isPositive = await checkPositiveLead(activeApiKey, leadPrompt, recentMsgs);
-            if (isPositive) {
-                const fullChat = fullConversation.messages
-                  .map(m => `${m.speaker}: ${m.content}`)
-                  .join("\n");
-                await sendLeadAlertEmail(leadName, fullChat, targetEmail);
-                updateStats("leadsFound", 1);
-                addLog("SUCCESS", `HOT LEAD FOUND: ${leadName}. Email sent!`, "Bot");
-            }
-        } catch (e) {
-            addLog("ERROR", `Lead check failed: ${getErrorMsg(e)}`, "System");
+      try {
+        const recentMsgs = fullConversation.messages.slice(-2).map((m) => m.content);
+        const isPositive = await checkPositiveLead(activeApiKey, leadPrompt, recentMsgs);
+        if (isPositive) {
+          const fullChat = fullConversation.messages.map((m) => `${m.speaker}: ${m.content}`).join("\n");
+          await sendLeadAlertEmail(leadName, fullChat, targetEmail);
+          updateStats("leadsFound", 1);
+          addLog("SUCCESS", `HOT LEAD FOUND: ${leadName}. Email sent!`, "Bot");
         }
+      } catch (e) {
+        addLog("ERROR", `Lead check failed: ${getErrorMsg(e)}`, "System");
+      }
     }
 
     let replyData: { reply: string; tokensUsed: number };
     try {
       replyData = await fetchReply(
-        activeApiKey, 
-        prompt, 
+        activeApiKey,
+        prompt,
         fullConversation.messages,
-        leadName, 
+        leadName,
         myName,
         fullConversation.profile,
-        useGroq, 
+        useGroq,
         groqModel
       );
-      
-      updateStats("tokensUsed", stats.tokensUsed + replyData.tokensUsed);
-      
+
+      updateStats("tokensUsed", replyData.tokensUsed);
     } catch (e) {
       addLog("ERROR", `Reply Generation Failed: ${getErrorMsg(e)}`, "System");
       continue;
     }
 
-    // ✅ SEND REPLY (with double-text support)
+    // ✅ NEW: Reply preview - wait for approval if enabled
+    let finalReply = replyData.reply;
+    if (replyPreviewEnabled) {
+      const approval = await waitForReplyApproval(leadName, replyData.reply);
+      if (!approval.approved) {
+        addLog("INFO", `Reply to ${leadName} was skipped by user`, "User");
+        continue;
+      }
+      finalReply = approval.reply;
+    }
+
     const input = document.querySelector<HTMLElement>("div.msg-form__contenteditable[role='textbox']");
     const sendBtn = document.querySelector<HTMLButtonElement>("button.msg-form__send-button");
-    
+
     if (input && sendBtn) {
       const conversationMeta = {
         messageCount: fullConversation.messages.length,
-        lastMessageQuestions: (fullConversation.messages[fullConversation.messages.length - 1]?.content.match(/\?/g) || []).length
+        lastMessageQuestions: (fullConversation.messages[fullConversation.messages.length - 1]?.content.match(/\?/g) || [])
+          .length,
       };
-      
-      const shouldSplit = shouldDoubleText(replyData.reply, conversationMeta);
-      const doubleTextPattern = shouldSplit ? generateDoubleText(replyData.reply, conversationMeta) : null;
-      
+
+      const shouldSplit = shouldDoubleText(finalReply, conversationMeta);
+      const doubleTextPattern = shouldSplit ? generateDoubleText(finalReply, conversationMeta) : null;
+
       if (doubleTextPattern) {
-        // DOUBLE-TEXT MODE
         addLog("ACTION", `Double-texting ${leadName} (${doubleTextPattern.pattern})...`, "Bot");
-        
+
         const typingDelay1 = calculateTypingDelay(doubleTextPattern.firstMessage);
         await delay(typingDelay1);
         await humanType(input, doubleTextPattern.firstMessage);
         await delay(800);
-        
+
         const isDisabled1 = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
         if (!isDisabled1) {
           sendBtn.click();
           await delay(500);
-          
+
           const betweenDelay = calculateDoubleTextDelay(doubleTextPattern.pattern);
-          addLog("INFO", `Waiting ${Math.round(betweenDelay/1000)}s before second message...`, "Bot");
+          addLog("INFO", `Waiting ${Math.round(betweenDelay / 1000)}s before second message...`, "Bot");
           await delay(betweenDelay);
-          
+
           const typingDelay2 = calculateTypingDelay(doubleTextPattern.secondMessage);
           await delay(typingDelay2);
           await humanType(input, doubleTextPattern.secondMessage);
           await delay(800);
-          
+
           const isDisabled2 = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
           if (!isDisabled2) {
             sendBtn.click();
             await delay(500);
-            
+
             updateStats("repliesSent", 1);
-            
+
             fullConversation.messages.push(
               {
                 speaker: myName,
                 content: doubleTextPattern.firstMessage,
                 timestamp: Date.now() - betweenDelay,
-                type: 'sent'
+                type: "sent",
               },
               {
                 speaker: myName,
                 content: doubleTextPattern.secondMessage,
                 timestamp: Date.now(),
-                type: 'sent'
+                type: "sent",
               }
             );
-            
+
             fullConversation.metadata.lastActivity = Date.now();
-            fullConversation.metadata.lastMessageFrom = 'me';
+            fullConversation.metadata.lastMessageFrom = "me";
             fullConversation.metadata.totalMessages += 2;
             fullConversation.metadata.lastSyncedAt = Date.now();
-            
+
             await saveConversation(fullConversation);
-            
-            addLog("SUCCESS", `Double-texted ${formatProfileForDisplay(leadName, fullConversation.profile)} (${getModelDisplayName(currentModelName)}) [History: ${fullConversation.messages.length} msgs]`, "Bot");
+
+            addLog(
+              "SUCCESS",
+              `Double-texted ${formatProfileForDisplay(leadName, fullConversation.profile)} (${getModelDisplayName(currentModelName)}) [History: ${fullConversation.messages.length} msgs]`,
+              "Bot"
+            );
           }
         }
-        
       } else {
-        // SINGLE MESSAGE MODE
-        const typingDelay = calculateTypingDelay(replyData.reply);
-        addLog("ACTION", `Typing reply to ${leadName} (waiting ${Math.round(typingDelay/1000)}s)...`, "Bot");
+        const typingDelay = calculateTypingDelay(finalReply);
+        addLog("ACTION", `Typing reply to ${leadName} (waiting ${Math.round(typingDelay / 1000)}s)...`, "Bot");
         await delay(typingDelay);
 
-        await humanType(input, replyData.reply);
+        await humanType(input, finalReply);
         await delay(800);
-        
+
         const isDisabled = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
         if (!isDisabled) {
           sendBtn.click();
           await delay(500);
-          
+
           const inputText = input.textContent?.trim() || "";
           if (inputText.length === 0) {
             updateStats("repliesSent", 1);
-            
+
             fullConversation.messages.push({
               speaker: myName,
-              content: replyData.reply,
+              content: finalReply,
               timestamp: Date.now(),
-              type: 'sent'
+              type: "sent",
             });
             fullConversation.metadata.lastActivity = Date.now();
-            fullConversation.metadata.lastMessageFrom = 'me';
+            fullConversation.metadata.lastMessageFrom = "me";
             fullConversation.metadata.totalMessages++;
             fullConversation.metadata.lastSyncedAt = Date.now();
-            
+
             await saveConversation(fullConversation);
-            
-            addLog("SUCCESS", `Sent reply to ${formatProfileForDisplay(leadName, fullConversation.profile)} (${getModelDisplayName(currentModelName)}) [History: ${fullConversation.messages.length} msgs]`, "Bot");
+
+            addLog(
+              "SUCCESS",
+              `Sent reply to ${formatProfileForDisplay(leadName, fullConversation.profile)} (${getModelDisplayName(currentModelName)}) [History: ${fullConversation.messages.length} msgs]`,
+              "Bot"
+            );
           } else {
             addLog("WARNING", `Message may not have sent to ${leadName}`, "System");
           }
@@ -666,61 +744,137 @@ async function runIteration(n: number) {
   }
 
   addLog("INFO", "Batch finished. Sleeping...", "System");
-  
-  if (botRunning) {
+
+  if (botRunning && !botPaused) {
     botLoopTimeout = window.setTimeout(
-      () => runIteration(n), 
+      () => runIteration(n),
       Math.floor(Math.random() * (loopMax - loopMin + 1)) + loopMin
     );
   }
 }
 
 function randomDelay(min: number, max: number) {
-    return delay(Math.floor(Math.random() * (max - min + 1)) + min);
+  return delay(Math.floor(Math.random() * (max - min + 1)) + min);
 }
 
 function getErrorMsg(err: unknown): string {
-    if (typeof err === "string") return err;
-    if (err && typeof err === "object" && "message" in err) return (err as any).message;
-    return "Unknown error";
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object" && "message" in err) return (err as any).message;
+  return "Unknown error";
 }
 
 // --- MESSAGE LISTENER ---
 chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse) => {
-  if (msg.type === "PING_TEST") { 
-      sendResponse("✅ Content script active!"); 
-      return; 
+  if (msg.type === "PING_TEST") {
+    sendResponse("✅ Content script active!");
+    return;
   }
-  
+
   if (msg.type === "GET_STATUS") {
-      const status: BotStatus = { running: botRunning, stats, logs };
-      sendResponse(status);
-      return;
+    const status: BotStatus & { paused: boolean } = {
+      running: botRunning,
+      paused: botPaused,
+      stats,
+      logs,
+    };
+    sendResponse(status);
+    return;
   }
 
   if (msg.type === "START_BOT") {
     if (!botRunning) {
-        botRunning = true;
-        stats.startTime = Date.now();
-        stats.tokensUsed = 0;
-        useStrictHours = msg.config?.strictHours ?? true;
-        useGroq = msg.config?.useGroq ?? false;
-        groqModel = msg.config?.groqModel ?? "llama-3.3-70b-versatile";
-        
-        addLog("INFO", `Bot started (Provider: ${useGroq ? 'Groq' : 'OpenAI'}, Strict Hours: ${useStrictHours ? 'ON' : 'OFF'})`, "User");
-        runIteration(msg.config?.nChats ?? 10);
-        sendResponse({ status: "ok" });
+      botRunning = true;
+      botPaused = false;
+      stats = {
+        chatsProcessed: 0,
+        repliesSent: 0,
+        leadsFound: 0,
+        startTime: Date.now(),
+        tokensUsed: 0,
+        currentModel: "",
+      };
+      useStrictHours = msg.config?.strictHours ?? true;
+      useGroq = msg.config?.useGroq ?? false;
+      groqModel = msg.config?.groqModel ?? "llama-3.3-70b-versatile";
+      replyPreviewEnabled = (msg as any).config?.replyPreviewEnabled ?? false;
+      blacklist = (msg as any).config?.blacklist ?? [];
+
+      addLog(
+        "INFO",
+        `Bot started (Provider: ${useGroq ? "Groq" : "OpenAI"}, Strict Hours: ${useStrictHours ? "ON" : "OFF"}, Preview: ${replyPreviewEnabled ? "ON" : "OFF"})`,
+        "User"
+      );
+      runIteration(msg.config?.nChats ?? 10);
+      sendResponse({ status: "ok" });
     } else {
-        sendResponse({ status: "error", error: "Already running" });
+      sendResponse({ status: "error", error: "Already running" });
     }
     return;
   }
 
   if (msg.type === "STOP_BOT") {
     botRunning = false;
+    botPaused = false;
     if (botLoopTimeout !== null) clearTimeout(botLoopTimeout);
     addLog("INFO", "Bot stopped by user", "User");
     sendResponse({ status: "stopped" });
+    return;
+  }
+
+  // ✅ NEW: Pause handler
+  if (msg.type === "PAUSE_BOT") {
+    if (botRunning && !botPaused) {
+      botPaused = true;
+      addLog("INFO", "Bot paused by user", "User");
+      sendResponse({ status: "paused" });
+    } else {
+      sendResponse({ status: "error", error: "Not running or already paused" });
+    }
+    return;
+  }
+
+  // ✅ NEW: Resume handler
+  if (msg.type === "RESUME_BOT") {
+    if (botRunning && botPaused) {
+      botPaused = false;
+      addLog("INFO", "Bot resumed by user", "User");
+      sendResponse({ status: "running" });
+    } else {
+      sendResponse({ status: "error", error: "Not paused" });
+    }
+    return;
+  }
+
+  // ✅ NEW: Approve reply handler
+  if (msg.type === "APPROVE_REPLY") {
+    if (pendingReplyResolve) {
+      addLog("SUCCESS", `Reply to ${msg.leadName} approved`, "User");
+      pendingReplyResolve({ approved: true, reply: msg.reply });
+      pendingReplyResolve = null;
+      chrome.storage.local.remove(["pendingReply"]);
+    }
+    sendResponse({ status: "ok" });
+    return;
+  }
+
+  // ✅ NEW: Reject reply handler
+  if (msg.type === "REJECT_REPLY") {
+    if (pendingReplyResolve) {
+      addLog("INFO", `Reply to ${msg.leadName} rejected`, "User");
+      pendingReplyResolve({ approved: false, reply: "" });
+      pendingReplyResolve = null;
+      chrome.storage.local.remove(["pendingReply"]);
+    }
+    sendResponse({ status: "ok" });
+    return;
+  }
+
+  // Handle CHECK_UNREAD from background script
+  if (msg.type === "CHECK_UNREAD") {
+    if (botRunning && !botPaused) {
+      addLog("INFO", "Check unread triggered by background", "System");
+    }
+    sendResponse({ status: "ok" });
     return;
   }
 });

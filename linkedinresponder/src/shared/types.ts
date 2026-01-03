@@ -1,3 +1,9 @@
+// linkedinresponder/src/shared/types.ts
+//
+// NOTE: BotConfig is used for RUNTIME state passed via messages.
+// For STORAGE schema, see BotSettings in settings.ts.
+// These are intentionally separate to allow flexibility.
+
 export interface BotConfig {
   openaiApiKey: string;
   groqApiKey: string;

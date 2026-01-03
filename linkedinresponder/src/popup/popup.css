@@ -1,5 +1,26 @@
+/* linkedinresponder/src/popup/popup.css */
 @import url("https://fonts.googleapis.com/css2?family=Alata&display=swap");
 @import "tailwindcss";
+
+:root {
+  --popup-width: 460px;
+  --popup-height: 640px;
+
+  --bg1: #fbf2c4;
+  --bg2: #e5c185;
+
+  --text: #173a35;
+  --muted: #6c757d;
+
+  --accent: #008585;
+  --accent-2: #c7522a;
+
+  --panel: rgba(255, 255, 255, 0.92);
+  --border: rgba(0, 0, 0, 0.08);
+
+  --radius: 14px;
+  --terminal-min-height: 180px;
+}
 
 * {
   margin: 0;
@@ -10,23 +31,54 @@
 html,
 body,
 #popup-root {
-  width: 450px;
-  height: 600px;
+  width: var(--popup-width);
+  height: var(--popup-height);
   overflow: hidden;
   font-family: "Alata", sans-serif;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
-  background: linear-gradient(135deg, #fbf2c4 0%, #e5c185 100%);
+  background: linear-gradient(135deg, var(--bg1) 0%, var(--bg2) 100%);
 }
 
-/* Custom scrollbar */
+#popup-root {
+  display: flex;
+  flex-direction: column;
+}
+
+.popup-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px;
+  gap: 10px;
+}
+
+.popup-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+
+.log-container {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scroll-behavior: smooth;
+  min-height: var(--terminal-min-height);
+}
+
 .log-container::-webkit-scrollbar {
-  width: 5px;
+  width: 6px;
 }
 
 .log-container::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.1);
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
 }
 
 .log-container::-webkit-scrollbar-thumb {
@@ -35,5 +87,45 @@ body {
 }
 
 .log-container::-webkit-scrollbar-thumb:hover {
-  background: #008585;
+  background: var(--accent);
+}
+
+button {
+  min-height: 36px;
+  border-radius: 10px;
+}
+
+button:focus,
+button:focus-visible,
+input:focus,
+textarea:focus,
+select:focus {
+  outline: 2px solid rgba(0, 133, 133, 0.35);
+  outline-offset: 2px;
+}
+
+input,
+select,
+textarea {
+  font-size: 13px;
+}
+
+.noselect {
+  user-select: none;
+}
+
+.terminal-wrapper {
+  flex: 1;
+  min-height: var(--terminal-min-height);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Material Symbols styling */
+.material-symbols-outlined {
+  font-variation-settings:
+    'FILL' 0,
+    'wght' 400,
+    'GRAD' 0,
+    'opsz' 20;
 }

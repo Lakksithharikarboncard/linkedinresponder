@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LinkedIn AI Responder",
-  "version": "2.1.2",
+  "version": "2.5.0",
   "description": "Automate professional replies to LinkedIn messages with human-like behavior—AI-powered auto-reply, navigation, and more.",
   "action": { 
     "default_popup": "popup.html",
@@ -9,12 +9,19 @@
   },
   "options_page": "options.html",
   "permissions": [
-    "storage", "alarms", "notifications", "activeTab","tabs"
+    "storage", 
+    "alarms", 
+    "notifications", 
+    "activeTab",
+    "tabs"
   ],
   "host_permissions": [
     "*://*.linkedin.com/messaging*"
   ],
-  "background": { "service_worker": "background.js" },
+  "background": { 
+    "service_worker": "background.js",
+    "type": "module"
+  },
   "content_scripts": [
     {
       "matches": ["*://*.linkedin.com/messaging*"],

@@ -1,190 +1,151 @@
+// linkedinresponder/src/background/background.ts
+//
+// Purpose: Service worker for the Chrome extension
+// Responsibilities:
+//   - Periodic scan alarms
+//   - Bot state persistence
+//   - Message routing between popup and content scripts
+//
+// Note: All reply generation logic lives in content.ts
+//       This file is intentionally minimal.
 
+import { getBotSettings } from "../shared/settings";
 
-import { randomBetween, sleep } from "../shared/utils";
+// --- STATE ---
+let botEnabled = false;
 
-let openaiKey = "";
-let minDelay = 300;
-let maxDelay = 900;
-let autoEnabled = false;
-let replyPrompt = "Reply briefly and professionally to this LinkedIn message:";
+// --- INITIALIZATION ---
+async function initialize() {
+  // Load persisted bot state
+  const result = await chrome.storage.local.get(["botEnabled"]);
+  botEnabled = result.botEnabled ?? false;
 
-chrome.storage.local.get(
-  ["openaiApiKey", "minDelay", "maxDelay", "autoReplyEnabled", "replyPrompt"],
-  res => {
-    openaiKey = res.openaiApiKey || "";
-    minDelay = res.minDelay || minDelay;
-    maxDelay = res.maxDelay || maxDelay;
-    autoEnabled = res.autoReplyEnabled || false;
-    replyPrompt = res.replyPrompt || replyPrompt;
-  }
-);
-
-chrome.storage.onChanged.addListener((changes) => {
-  if (changes.openaiApiKey) openaiKey = changes.openaiApiKey.newValue;
-  if (changes.minDelay) minDelay = changes.minDelay.newValue;
-  if (changes.maxDelay) maxDelay = changes.maxDelay.newValue;
-  if (changes.autoReplyEnabled) autoEnabled = changes.autoReplyEnabled.newValue;
-  if (changes.replyPrompt) replyPrompt = changes.replyPrompt.newValue;
-});
-
-// Periodic scan
-chrome.alarms.create("scan", { periodInMinutes: 5 });
-chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === "scan" && autoEnabled) {
-    runScan();
-  }
-});
-
-function runScan() {
-  chrome.tabs.query(
-    { url: "https://www.linkedin.com/messaging/*" },
-    tabs => {
-      tabs.forEach(tab => {
-        if (tab.id !== undefined) {
-          chrome.tabs.sendMessage(tab.id, { type: "CHECK_UNREAD" });
-        }
-      });
-    }
-  );
+  console.log(`[Background] Initialized. Bot enabled: ${botEnabled}`);
 }
 
-// Remove this entire block - popup will open automatically from manifest
+initialize();
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  switch (msg.type) {
-    case "RUN_SCAN_NOW":
-      if (autoEnabled) runScan();
-      sendResponse({ status: autoEnabled ? "running" : "stopped" });
-      break;
-    case "START_BOT":
-      autoEnabled = true;
-      chrome.storage.local.set({ autoReplyEnabled: true });
-      sendResponse({ status: "running" });
-      break;
-    case "STOP_BOT":
-      autoEnabled = false;
-      chrome.storage.local.set({ autoReplyEnabled: false });
-      sendResponse({ status: "stopped" });
-      break;
-    case "PING_BOT":
-      sendResponse({ status: autoEnabled ? "running" : "stopped" });
-      break;
-    case "NEW_MESSAGE":
-      handleNewMessage(msg.payload, sender);
-      break;
-    case "GENERATE_AND_SEND":
-      handleGenerateAndSend(msg, sender);
-      break;
+// --- STORAGE LISTENER ---
+// Keep local state in sync if changed elsewhere (e.g., from content script)
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local") return;
+
+  if (changes.botEnabled !== undefined) {
+    botEnabled = changes.botEnabled.newValue ?? false;
+    console.log(`[Background] Bot enabled changed: ${botEnabled}`);
   }
-  return true;
 });
 
-function handleNewMessage(payload: any, sender: chrome.runtime.MessageSender) {
-  const tab = sender.tab;
-  if (!tab || tab.id === undefined) return;
+// --- ALARM SETUP ---
+// Periodic scan every 5 minutes when bot is enabled
+const SCAN_ALARM_NAME = "linkedin-scan";
+const SCAN_INTERVAL_MINUTES = 5;
 
-  const { chatId, messageText } = payload;
-  const tabId = tab.id;
-  const today = new Date().toISOString().slice(0, 10);
+chrome.alarms.create(SCAN_ALARM_NAME, { periodInMinutes: SCAN_INTERVAL_MINUTES });
 
-  chrome.storage.local.get(["repliedChats"], async (res) => {
-    const repliedChats = res.repliedChats || {};
-    const todaysList: string[] = repliedChats[today] || [];
-    if (todaysList.includes(chatId)) return;
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === SCAN_ALARM_NAME && botEnabled) {
+    console.log("[Background] Alarm triggered, running scan...");
+    triggerScanOnLinkedInTabs();
+  }
+});
 
-    try {
-      const replyText = await generateReply(messageText);
-      chrome.tabs.sendMessage(tabId, { type: "SEND_REPLY", payload: { chatId, replyText } });
-      repliedChats[today] = [...todaysList, chatId];
-      chrome.storage.local.set({ repliedChats });
-      await sleep(randomBetween(minDelay, maxDelay));
-    } catch (err) {
-      chrome.notifications.create({
-        type: "basic",
-        iconUrl: "i.png",
-        title: "Auto-Reply Error",
-        message: (err as Error).message || "Error calling OpenAI"
-      });
-    }
-  });
-}
+// --- SCAN LOGIC ---
+async function triggerScanOnLinkedInTabs() {
+  try {
+    const tabs = await chrome.tabs.query({ url: "https://www.linkedin.com/messaging/*" });
 
-function handleGenerateAndSend(
-  msg: any,
-  sender: chrome.runtime.MessageSender
-) {
-  const tab = sender.tab;
-  if (!tab || tab.id === undefined) return;
-
-  const { chatId, chatHistory } = msg;
-  chrome.storage.local.get(["openaiApiKey", "replyPrompt"], async (res) => {
-    const key = res.openaiApiKey;
-    const prompt = res.replyPrompt || replyPrompt;
-    if (!key) {
-      console.warn("OpenAI API key not set.");
+    if (tabs.length === 0) {
+      console.log("[Background] No LinkedIn messaging tabs found");
       return;
     }
 
-    try {
-      const apiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${key}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "gpt-3.5-turbo",
-          messages: [
-            { role: "system", content: prompt },
-            { role: "user", content: chatHistory }
-          ]
-        })
-      });
-
-      if (!apiResponse.ok) {
-        console.error("OpenAI API error:", apiResponse.statusText);
-        return;
-      }
-
-      const data = await apiResponse.json();
-      const reply: string = data.choices?.[0]?.message?.content || "Sorry, I couldn't generate a reply.";
-
-      if (typeof tab.id === "number") {
-        chrome.tabs.sendMessage(tab.id, {
-          type: "SEND_REPLY",
-          chatId,
-          replyText: reply
+    for (const tab of tabs) {
+      if (tab.id !== undefined) {
+        chrome.tabs.sendMessage(tab.id, { type: "CHECK_UNREAD" }).catch((err) => {
+          // Tab might not have content script loaded
+          console.log(`[Background] Could not message tab ${tab.id}:`, err.message);
         });
       }
+    }
 
-    } catch (err) {
-      console.error("OpenAI fetch failed:", err);
+    console.log(`[Background] Sent CHECK_UNREAD to ${tabs.length} tab(s)`);
+  } catch (err) {
+    console.error("[Background] Scan failed:", err);
+  }
+}
+
+// --- MESSAGE HANDLING ---
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  handleMessage(message, sender, sendResponse);
+  return true; // Keep channel open for async response
+});
+
+async function handleMessage(
+  message: { type: string; [key: string]: any },
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response: any) => void
+) {
+  const { type } = message;
+
+  switch (type) {
+    case "PING_BOT":
+      sendResponse({ status: botEnabled ? "running" : "stopped" });
+      break;
+
+    case "START_BOT":
+      botEnabled = true;
+      await chrome.storage.local.set({ botEnabled: true });
+      console.log("[Background] Bot started via message");
+      sendResponse({ status: "running" });
+      break;
+
+    case "STOP_BOT":
+      botEnabled = false;
+      await chrome.storage.local.set({ botEnabled: false });
+      console.log("[Background] Bot stopped via message");
+      sendResponse({ status: "stopped" });
+      break;
+
+    case "RUN_SCAN_NOW":
+      if (botEnabled) {
+        triggerScanOnLinkedInTabs();
+        sendResponse({ status: "running" });
+      } else {
+        sendResponse({ status: "stopped" });
+      }
+      break;
+
+    case "GET_SETTINGS":
+      // Provide settings to any requester (useful for debugging)
+      try {
+        const settings = await getBotSettings();
+        sendResponse({ status: "ok", settings });
+      } catch (err) {
+        sendResponse({ status: "error", error: String(err) });
+      }
+      break;
+
+    default:
+      console.log(`[Background] Unknown message type: ${type}`);
+      sendResponse({ status: "unknown" });
+  }
+}
+
+// --- EXTENSION LIFECYCLE ---
+chrome.runtime.onInstalled.addListener((details) => {
+  console.log(`[Background] Extension installed/updated: ${details.reason}`);
+
+  // Ensure alarm exists after install/update
+  chrome.alarms.get(SCAN_ALARM_NAME, (alarm) => {
+    if (!alarm) {
+      chrome.alarms.create(SCAN_ALARM_NAME, { periodInMinutes: SCAN_INTERVAL_MINUTES });
+      console.log("[Background] Scan alarm created");
     }
   });
-}
+});
 
-async function generateReply(messageText: string): Promise<string> {
-  if (!openaiKey) throw new Error("Missing OpenAI API key in Settings.");
-
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${openaiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4",
-      messages: [
-        { role: "system", content: replyPrompt },
-        { role: "user", content: messageText }
-      ]
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error("OpenAI error: " + response.statusText);
-  }
-
-  const { choices } = await response.json();
-  return choices[0].message.content;
-}
+// Optional: Handle extension icon click (if not using popup)
+// chrome.action.onClicked.addListener((tab) => {
+//   chrome.tabs.create({ url: "popup.html" });
+// });

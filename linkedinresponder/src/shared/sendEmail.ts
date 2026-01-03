@@ -1,108 +1,113 @@
+// linkedinresponder/src/shared/sendEmail.ts
+
+import { getBotSettings } from "./settings";
+
 // ✅ UPDATED: Smart skip logic with rule-based decision making
 export async function shouldReplyToConversation(
   apiKey: string,
   conversation: Array<{ speaker: string; message: string }>,
   leadName: string
 ): Promise<{ shouldReply: boolean; reason: string }> {
-  
   if (conversation.length === 0) {
     return { shouldReply: false, reason: "Empty conversation" };
   }
 
   const lastMessage = conversation[conversation.length - 1];
   const lastMessageText = lastMessage.message.toLowerCase();
-  
+
   // Get all messages from the bot (not the lead)
-  const myMessages = conversation.filter(msg => msg.speaker !== leadName);
-  const theirMessages = conversation.filter(msg => msg.speaker === leadName);
+  const myMessages = conversation.filter((msg) => msg.speaker !== leadName);
+  const theirMessages = conversation.filter((msg) => msg.speaker === leadName);
 
   // ✅ RULE 1: Never skip if they just answered YOUR question
   if (myMessages.length > 0) {
     const myLastMessage = myMessages[myMessages.length - 1];
-    const myLastWasQuestion = myLastMessage.message.includes('?');
+    const myLastWasQuestion = myLastMessage.message.includes("?");
     const theirLastIsAnswer = theirMessages[theirMessages.length - 1] === lastMessage;
-    
-    // Check if my last message was a question and they just responded
-    const myLastIndex = conversation.findIndex(msg => msg === myLastMessage);
+
+    const myLastIndex = conversation.findIndex((msg) => msg === myLastMessage);
     const theirLastIndex = conversation.length - 1;
-    
+
     if (myLastWasQuestion && theirLastIsAnswer && theirLastIndex > myLastIndex) {
       return {
         shouldReply: true,
-        reason: "They answered my question - must acknowledge and continue"
+        reason: "They answered my question - must acknowledge and continue",
       };
     }
   }
 
   // ✅ RULE 2: Never skip on short answers if conversation is active
-  const isShortAnswer = lastMessage.message.split(' ').length < 20;
+  const isShortAnswer = lastMessage.message.split(" ").length < 20;
   const hasRecentExchange = myMessages.length > 0 && theirMessages.length > 0;
-  
+
   if (isShortAnswer && hasRecentExchange && myMessages.length >= 2) {
-    // Short answer in an active conversation = they're engaged
     return {
       shouldReply: true,
-      reason: "Short but engaged response - continuing conversation flow"
+      reason: "Short but engaged response - continuing conversation flow",
     };
   }
 
   // ✅ RULE 3: Only skip on explicit disengagement phrases
   const disengagementPhrases = [
-    'not interested',
-    'no thanks',
-    'not right now',
-    'too busy right now',
-    'maybe later',
-    'not a fit',
-    'not looking',
-    'thanks but no',
-    'appreciate it but',
-    'not what we need',
-    'have a great day',
-    'talk soon',
-    'take care',
-    'bye',
-    'goodbye',
-    'gotta go',
-    'catch you later'
+    "not interested",
+    "no thanks",
+    "not right now",
+    "too busy right now",
+    "maybe later",
+    "not a fit",
+    "not looking",
+    "thanks but no",
+    "appreciate it but",
+    "not what we need",
+    "have a great day",
+    "talk soon",
+    "take care",
+    "bye",
+    "goodbye",
+    "gotta go",
+    "catch you later",
   ];
-  
-  const hasDisengagement = disengagementPhrases.some(phrase => 
-    lastMessageText.includes(phrase)
-  );
-  
+
+  const hasDisengagement = disengagementPhrases.some((phrase) => lastMessageText.includes(phrase));
   if (hasDisengagement) {
     return {
       shouldReply: false,
-      reason: "Lead explicitly disengaged or ended conversation"
+      reason: "Lead explicitly disengaged or ended conversation",
     };
   }
 
   // ✅ Check for positive engagement signals
   const engagementSignals = [
-    'yes', 'yeah', 'sure', 'absolutely', 'definitely',
-    'interested', 'sounds good', 'tell me more',
-    'how does', 'what about', 'can you', 'could you',
-    'would love to', 'want to know', 'curious about',
-    '?'  // Questions are engagement
+    "yes",
+    "yeah",
+    "sure",
+    "absolutely",
+    "definitely",
+    "interested",
+    "sounds good",
+    "tell me more",
+    "how does",
+    "what about",
+    "can you",
+    "could you",
+    "would love to",
+    "want to know",
+    "curious about",
+    "?", // Questions are engagement
   ];
-  
-  const hasEngagement = engagementSignals.some(signal => 
-    lastMessageText.includes(signal)
-  );
-  
+
+  const hasEngagement = engagementSignals.some((signal) => lastMessageText.includes(signal));
   if (hasEngagement) {
     return {
       shouldReply: true,
-      reason: "Positive engagement detected - they're interested"
+      reason: "Positive engagement detected - they're interested",
     };
   }
 
   // ✅ RULE 4: Use AI as fallback for complex cases
-  // Only use AI when rules above don't give a clear answer
   const conversationText = conversation
-    .slice(-20)  // Full 20 message context
-    .map(msg => `${msg.speaker}: ${msg.message}`)
+    .slice(-20)
+    .map((msg) => `${msg.speaker}: ${msg.message}`)
     .join("\n");
 
   const decisionPrompt = `You are analyzing a LinkedIn conversation to decide if a response is needed.
@@ -144,37 +149,34 @@ Be biased toward REPLY unless there's clear disengagement.`;
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: decisionPrompt }],
-        temperature: 0.2,  // Lower temperature for more consistent decisions
+        temperature: 0.2,
         max_tokens: 60,
       }),
     });
 
     if (!res.ok) {
-      // If AI fails, default to replying (better to over-engage than miss opportunities)
-      return { 
-        shouldReply: true, 
-        reason: "AI check failed - defaulting to reply" 
+      return {
+        shouldReply: true,
+        reason: "AI check failed - defaulting to reply",
       };
     }
 
     const data = await res.json();
     const reply = data.choices?.[0]?.message?.content?.trim() || "";
-    
+
     const shouldReply = reply.toUpperCase().startsWith("REPLY");
     const reason = reply.split(":")[1]?.trim() || "AI decision";
 
     return { shouldReply, reason };
   } catch (err) {
     console.error("❌ AI decision check failed:", err);
-    // Default to replying on error
-    return { 
-      shouldReply: true, 
-      reason: "AI error - defaulting to engage" 
+    return {
+      shouldReply: true,
+      reason: "AI error - defaulting to engage",
     };
   }
 }
 
-// Existing lead check function (upgraded to gpt-4o-mini)
 export async function checkPositiveLead(
   apiKey: string,
   leadPrompt: string,
@@ -209,70 +211,66 @@ Respond with only one word: "yes" or "no".`;
   }
 }
 
-// ✅ NEW: Send email using Resend REST API
-export async function sendLeadAlertEmail(
-  leadName: string,
-  conversation: string,
-  recipientEmail: string
-) {
-  const RESEND_API_KEY = "re_V2cc9Nqe_2QaLJuLneRiYKEHAnmFGaEc2"; // Your Resend API key
+// ✅ Send email using Resend REST API (reads key from settings instead of hardcoding)
+export async function sendLeadAlertEmail(leadName: string, conversation: string, recipientEmail: string) {
+  const { resendApiKey } = await getBotSettings();
 
-  try {
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${RESEND_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: "LinkedIn AI Bot <onboarding@resend.dev>", // ✅ Change to your verified domain
-        to: [recipientEmail],
-        subject: `🔥 Hot Lead: ${leadName}`,
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h1 style="color: #0066cc; border-bottom: 3px solid #0066cc; padding-bottom: 10px;">
-              🎯 New Qualified Lead Alert
-            </h1>
-            
-            <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
-              <h2 style="color: #333; margin-top: 0;">Lead Name</h2>
-              <p style="font-size: 18px; font-weight: bold; color: #0066cc;">${leadName}</p>
-            </div>
+  if (!resendApiKey || resendApiKey.trim().length === 0) {
+    // Keep behavior safe: if no key configured, don't send and surface a clear error
+    throw new Error("Resend API key is not set in Options. Please configure resendApiKey.");
+  }
 
-            <div style="background: white; border: 1px solid #ddd; padding: 20px; border-radius: 8px;">
-              <h2 style="color: #333;">Conversation History</h2>
-              <div style="white-space: pre-wrap; font-family: 'Courier New', monospace; font-size: 14px; line-height: 1.6; background: #f9f9f9; padding: 15px; border-left: 4px solid #0066cc; overflow-x: auto;">
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${resendApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: "LinkedIn AI Bot <onboarding@resend.dev>",
+      to: [recipientEmail],
+      subject: `🔥 Hot Lead: ${leadName}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1 style="color: #0066cc; border-bottom: 3px solid #0066cc; padding-bottom: 10px;">
+            🎯 New Qualified Lead Alert
+          </h1>
+
+          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <h2 style="color: #333; margin-top: 0;">Lead Name</h2>
+            <p style="font-size: 18px; font-weight: bold; color: #0066cc;">${leadName}</p>
+          </div>
+
+          <div style="background: white; border: 1px solid #ddd; padding: 20px; border-radius: 8px;">
+            <h2 style="color: #333;">Conversation History</h2>
+            <div style="white-space: pre-wrap; font-family: 'Courier New', monospace; font-size: 14px; line-height: 1.6; background: #f9f9f9; padding: 15px; border-left: 4px solid #0066cc; overflow-x: auto;">
 ${conversation}
-              </div>
-            </div>
-
-            <div style="margin-top: 30px; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 8px; text-align: center;">
-              <h3 style="margin: 0 0 10px 0;">Next Steps</h3>
-              <p style="margin: 0; font-size: 14px;">
-                Review the conversation and follow up with <strong>${leadName}</strong> on LinkedIn.
-              </p>
-            </div>
-
-            <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #999; font-size: 12px;">
-              <p>Sent by LinkedIn AI Responder</p>
-              <p>Automated lead notification system</p>
             </div>
           </div>
-        `,
-      }),
-    });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error("❌ Resend API error:", errorData);
-      throw new Error(`Resend API error: ${response.status}`);
-    }
+          <div style="margin-top: 30px; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 8px; text-align: center;">
+            <h3 style="margin: 0 0 10px 0;">Next Steps</h3>
+            <p style="margin: 0; font-size: 14px;">
+              Review the conversation and follow up with <strong>${leadName}</strong> on LinkedIn.
+            </p>
+          </div>
 
-    const data = await response.json();
-    console.log("✅ Email sent via Resend:", data);
-    return data;
-  } catch (error) {
-    console.error("❌ Email send failed:", error);
-    throw error;
+          <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #999; font-size: 12px;">
+            <p>Sent by LinkedIn AI Responder</p>
+            <p>Automated lead notification system</p>
+          </div>
+        </div>
+      `,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    console.error("❌ Resend API error:", errorData);
+    throw new Error(`Resend API error: ${response.status}`);
   }
+
+  const data = await response.json();
+  console.log("✅ Email sent via Resend:", data);
+  return data;
 }

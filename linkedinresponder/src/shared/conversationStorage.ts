@@ -1,3 +1,5 @@
+// linkedinresponder/src/shared/conversationStorage.ts
+
 import { ConversationHistory, MessageEntry, StoredConversations, LeadProfile } from "./types";
 
 const STORAGE_KEY = "conversation_histories";
@@ -7,7 +9,8 @@ const PROFILE_REFRESH_INTERVAL = 86400000; // 24 hours
 
 export function generateLeadId(leadName: string, profileUrl: string): string {
   const combined = `${leadName}_${profileUrl}`;
-  return btoa(combined).substring(0, 32);
+  // ✅ FIX: Handle unicode characters (José, 田中, Müller, etc.)
+  return btoa(unescape(encodeURIComponent(combined))).substring(0, 32);
 }
 
 export async function loadAllConversations(): Promise<StoredConversations> {
