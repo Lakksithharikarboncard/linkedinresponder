@@ -1,6 +1,7 @@
+ls
 ====================================================================================================
 LINKEDIN AUTORESPONDER - COMPLETE SOURCE CODE
-Generated: 2026-01-04T08:56:17.930Z
+Generated: 2026-01-04T09:30:28.637Z
 Total Files: 13
 ====================================================================================================
 
@@ -182,7 +183,6 @@ FILE: src/content/content.ts
 ====================================================================================================
 
 // linkedinresponder/src/content/content.ts
-
 import { BotCommand, BotLogEntry, BotStats, BotStatus, MessageEntry, ConversationHistory } from "../shared/types";
 import { checkPositiveLead, sendLeadWebhook, shouldReplyToConversation, LeadWebhookPayload } from "../shared/sendEmail";
 import { generateLeadId, loadConversation, saveConversation, shouldResync } from "../shared/conversationStorage";
@@ -215,7 +215,6 @@ let logs: BotLogEntry[] = [];
 let useStrictHours = true;
 let useGroq = false;
 let groqModel = "llama-3.3-70b-versatile";
-
 let replyPreviewEnabled = false;
 let pendingReplyResolve: ((approved: { approved: boolean; reply: string }) => void) | null = null;
 let blacklist: string[] = [];
@@ -226,23 +225,67 @@ const HEADLINE_BLACKLIST = ["student", "intern", "seeking", "open to work", "loo
 // Cooldown after any close (rejection OR positive scheduling confirmation)
 const CLOSE_COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 
-// ✅ EXPANDED: Patterns that indicate YOU closed the conversation (rejection/soft close)
+// ✅ FIXED: Patterns that indicate YOU closed the conversation (rejection/soft close)
+// Removed "no problem" - too ambiguous, often used in positive rescheduling contexts
 const MY_CLOSE_PATTERNS = [
   "no overlap",
   "not a fit",
   "reach out if",
   "feel free to reach out",
   "thanks for letting me know",
-  "no problem",
+  // "no problem", // ❌ REMOVED - causes false positives in rescheduling scenarios
   "happy to stay connected",
   "best of luck",
   "good luck with",
   "wishing you",
   "take care",
   "all the best",
+  "not what you're looking for",
+  "doesn't seem like a match",
+  "maybe in the future",
+  "keep in touch",
 ];
 
-// ✅ NEW: Patterns that indicate YOU sent a scheduling link/CTA
+// ✅ NEW: Positive context words that NEGATE close detection
+// If a message contains both a close pattern AND these words, it's NOT a close
+const POSITIVE_SCHEDULING_CONTEXT = [
+  "schedule",
+  "reschedule",
+  "next week",
+  "after jan",
+  "after january",
+  "after the",
+  "let's",
+  "lets",
+  "call",
+  "meet",
+  "demo",
+  "walkthrough",
+  "chat soon",
+  "talk soon",
+  "talk then",
+  "sounds good",
+  "works for me",
+  "perfect",
+  "great",
+  "book",
+  "calendar",
+  "calendly",
+  "outlook",
+];
+
+// ✅ NEW: Patterns that indicate a SOFT positive response (not a hard close)
+// Used to detect when "no problem" is actually positive
+const SOFT_POSITIVE_PATTERNS = [
+  "no problem",
+  "no worries", 
+  "sure thing",
+  "of course",
+  "absolutely",
+  "definitely",
+];
+
+// Patterns that indicate YOU sent a scheduling link/CTA
 const SCHEDULING_PATTERNS = [
   "calendly.com",
   "cal.com",
@@ -262,7 +305,7 @@ const SCHEDULING_PATTERNS = [
   "find a time",
 ];
 
-// ✅ NEW: Patterns that indicate LEAD confirmed/acknowledged positively (conversation complete)
+// Patterns that indicate LEAD confirmed/acknowledged positively (conversation complete)
 const LEAD_CONFIRMATION_PATTERNS = [
   "sounds good",
   "sounds great",
@@ -291,7 +334,7 @@ const LEAD_CONFIRMATION_PATTERNS = [
   "works for me",
 ];
 
-// ✅ NEW: Short ping messages that shouldn't trigger auto-reply after close
+// Short ping messages that shouldn't trigger auto-reply after close
 const SHORT_PING_PATTERNS = [
   "hi",
   "hey",
@@ -369,10 +412,8 @@ function isWithinWorkingHours(startHour: number = 9, endHour: number = 18): bool
 async function setEditableText(input: HTMLElement, text: string) {
   input.focus();
   await delay(50);
-
   document.execCommand("selectAll", false, "");
   document.execCommand("delete", false, "");
-
   for (const char of text) {
     document.execCommand("insertText", false, char);
     const charDelay = Math.random() > 0.9 ? 150 : 30 + Math.random() * 50;
@@ -516,7 +557,6 @@ async function getCompleteConversation(leadName: string): Promise<MessageEntry[]
 async function getOrCreateConversationHistory(leadName: string): Promise<ConversationHistory> {
   const profileUrl = getLeadProfileUrl();
   const leadId = generateLeadId(leadName, profileUrl);
-
   let existingConvo = await loadConversation(leadId);
   if (existingConvo && !shouldResync(existingConvo)) {
     addLog(
@@ -526,13 +566,10 @@ async function getOrCreateConversationHistory(leadName: string): Promise<Convers
     );
     return existingConvo;
   }
-
   addLog("INFO", `Scraping profile for ${leadName}...`, "System");
   const profileData = scrapeLeadProfile();
-
   addLog("INFO", `Syncing full history for ${leadName}...`, "System");
   const freshMessages = await getCompleteConversation(leadName);
-
   const lastMsg = freshMessages[freshMessages.length - 1];
   const conversation: ConversationHistory = {
     leadId,
@@ -548,24 +585,22 @@ async function getOrCreateConversationHistory(leadName: string): Promise<Convers
       lastSyncedAt: Date.now(),
     },
   };
-
   await saveConversation(conversation);
   addLog(
     "SUCCESS",
     `Saved ${freshMessages.length} messages + profile for ${formatProfileForDisplay(leadName, profileData)}`,
     "System"
   );
-
   return conversation;
 }
 
-// ✅ NEW: Check if a message contains a scheduling link/CTA
+// Check if a message contains a scheduling link/CTA
 function containsSchedulingLink(content: string): boolean {
   const lower = content.toLowerCase();
   return SCHEDULING_PATTERNS.some((pattern) => lower.includes(pattern));
 }
 
-// ✅ NEW: Check if a message is a lead confirmation (positive close)
+// Check if a message is a lead confirmation (positive close)
 function isLeadConfirmation(content: string): boolean {
   const lower = content.toLowerCase().trim();
   // Check if it's a short confirmation (≤ 6 words) matching patterns
@@ -575,7 +610,7 @@ function isLeadConfirmation(content: string): boolean {
   return LEAD_CONFIRMATION_PATTERNS.some((pattern) => lower.includes(pattern));
 }
 
-// ✅ NEW: Check if a message is a short ping (hi, hello, hey)
+// Check if a message is a short ping (hi, hello, hey)
 function isShortPing(content: string): boolean {
   const lower = content.toLowerCase().trim();
   const wordCount = lower.split(/\s+/).length;
@@ -586,7 +621,24 @@ function isShortPing(content: string): boolean {
   return SHORT_PING_PATTERNS.some((pattern) => lower === pattern || lower.startsWith(pattern + " "));
 }
 
-// ✅ NEW: Check if conversation is in "pending meeting" state
+// ✅ NEW: Check if a message has positive scheduling context
+// This prevents false-positive close detection
+function hasPositiveSchedulingContext(content: string): boolean {
+  const lower = content.toLowerCase();
+  return POSITIVE_SCHEDULING_CONTEXT.some((pattern) => lower.includes(pattern));
+}
+
+// ✅ NEW: Check if message is a soft positive (like "no problem" in positive context)
+function isSoftPositiveInContext(content: string): boolean {
+  const lower = content.toLowerCase();
+  const hasSoftPositive = SOFT_POSITIVE_PATTERNS.some((pattern) => lower.includes(pattern));
+  const hasPositiveContext = hasPositiveSchedulingContext(content);
+  
+  // If message has both "no problem" AND scheduling context, it's positive not a close
+  return hasSoftPositive && hasPositiveContext;
+}
+
+// Check if conversation is in "pending meeting" state
 // Returns timestamp of when meeting was scheduled, or null if not in pending state
 function getPendingMeetingTimestamp(messages: MessageEntry[]): number | null {
   // Look backwards through messages for the pattern:
@@ -607,8 +659,8 @@ function getPendingMeetingTimestamp(messages: MessageEntry[]): number | null {
       return currentMsg.timestamp;
     }
     
-    // Also check for: Their request to reschedule → My confirmation → Their confirmation
-    // E.g., "can we schedule after Jan 1?" → "Sure, no problem" → "Sounds good"
+    // ✅ IMPROVED: Also check for rescheduling flow
+    // Pattern: Their reschedule request → My positive response → Their confirmation
     if (i >= 2) {
       const prevPrevMsg = messages[i - 2];
       if (
@@ -616,8 +668,10 @@ function getPendingMeetingTimestamp(messages: MessageEntry[]): number | null {
         prevMsg.type === "sent" &&
         currentMsg.type === "received" &&
         (prevPrevMsg.content.toLowerCase().includes("schedule") ||
-         prevPrevMsg.content.toLowerCase().includes("after") ||
-         prevPrevMsg.content.toLowerCase().includes("next week")) &&
+          prevPrevMsg.content.toLowerCase().includes("after") ||
+          prevPrevMsg.content.toLowerCase().includes("next week") ||
+          prevPrevMsg.content.toLowerCase().includes("vacation") ||
+          prevPrevMsg.content.toLowerCase().includes("holiday")) &&
         isLeadConfirmation(currentMsg.content)
       ) {
         return currentMsg.timestamp;
@@ -628,12 +682,27 @@ function getPendingMeetingTimestamp(messages: MessageEntry[]): number | null {
   return null;
 }
 
-// ✅ NEW: Check if I soft-closed the conversation (rejection/polite close)
+// ✅ FIXED: Check if I soft-closed the conversation (rejection/polite close)
+// Now includes context awareness to avoid false positives
 function getMyCloseTimestamp(messages: MessageEntry[]): number | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.type === "sent") {
       const lower = m.content.toLowerCase();
+      
+      // ✅ NEW: Skip if message has positive scheduling context
+      // e.g., "no problem, let's schedule next week" is NOT a close
+      if (hasPositiveSchedulingContext(m.content)) {
+        continue;
+      }
+      
+      // ✅ NEW: Skip if this is a soft positive in context
+      // e.g., "Sure, no problem" followed by scheduling talk
+      if (isSoftPositiveInContext(m.content)) {
+        continue;
+      }
+      
+      // Check for actual close patterns
       if (MY_CLOSE_PATTERNS.some((p) => lower.includes(p))) {
         return m.timestamp;
       }
@@ -642,7 +711,7 @@ function getMyCloseTimestamp(messages: MessageEntry[]): number | null {
   return null;
 }
 
-// ✅ UPDATED: Comprehensive check for conversation close state
+// Comprehensive check for conversation close state
 interface ConversationCloseState {
   isClosed: boolean;
   closeType: "none" | "my_close" | "pending_meeting" | "lead_close";
@@ -681,7 +750,7 @@ function getConversationCloseState(messages: MessageEntry[]): ConversationCloseS
   };
 }
 
-// ✅ NEW: Determine if we should skip based on close state and incoming message
+// ✅ IMPROVED: Determine if we should skip based on close state and incoming message
 function shouldSkipDueToCloseState(
   closeState: ConversationCloseState,
   lastMessage: string
@@ -692,19 +761,36 @@ function shouldSkipDueToCloseState(
   
   const timeSinceClose = Date.now() - closeState.closeTimestamp;
   const isWithinCooldown = timeSinceClose < CLOSE_COOLDOWN_MS;
+  const daysSinceClose = Math.round(timeSinceClose / (1000 * 60 * 60 * 24));
   
-  // If it's a short ping (hi, hello, hey) after close, skip
-  if (isShortPing(lastMessage)) {
-    if (closeState.closeType === "pending_meeting") {
+  // ✅ NEW: For pending meetings, be more lenient
+  // They might be following up to actually schedule
+  if (closeState.closeType === "pending_meeting") {
+    // If it's a short ping AND within 7 days, they're probably following up to schedule
+    if (isShortPing(lastMessage) && daysSinceClose <= 7) {
+      // Actually engage - they're likely ready to book!
       return {
-        shouldSkip: true,
-        reason: `Short ping after scheduled meeting (${Math.round(timeSinceClose / (1000 * 60 * 60 * 24))} days ago)`,
+        shouldSkip: false,
+        reason: "Short ping after recent scheduling - likely ready to book",
       };
     }
-    if (closeState.closeType === "my_close" && isWithinCooldown) {
+    
+    // If it's been more than 7 days and just a short ping, might skip
+    if (isShortPing(lastMessage) && daysSinceClose > 7) {
       return {
         shouldSkip: true,
-        reason: `Short ping during close cooldown`,
+        reason: `Short ping ${daysSinceClose} days after scheduled meeting`,
+      };
+    }
+  }
+  
+  // For my_close (actual rejection/close), be stricter
+  if (closeState.closeType === "my_close") {
+    // If it's a short ping during cooldown, skip
+    if (isShortPing(lastMessage) && isWithinCooldown) {
+      return {
+        shouldSkip: true,
+        reason: `Short ping during close cooldown (${daysSinceClose} days ago)`,
       };
     }
   }
@@ -757,20 +843,16 @@ async function fetchReply(
   groqModelName: string = "llama-3.3-70b-versatile"
 ): Promise<{ reply: string; tokensUsed: number }> {
   const recentMessages = fullHistory.slice(-30);
-
   const conversationText = recentMessages.map((msg) => `${msg.speaker}: ${msg.content}`).join("\n");
-
   const timeContext = getTimeContext();
   const conversationAge = getConversationAge(fullHistory);
   const responsePattern = getResponsePattern(fullHistory);
   const toneGuidance = getToneGuidance(leadProfile);
   const profileContext = leadProfile ? `\n\nLEAD PROFILE:\n${formatProfileForAI(leadProfile)}\n` : "";
-
   const userPrompt = prompt
     .replace("{extracted_text}", conversationText)
     .replace("{user_name}", leadName)
     .replace("{lead_headline}", leadProfile?.headline || "Unknown");
-
   const systemPrompt = `You are a real professional messaging on LinkedIn (NOT an AI assistant).
 ${profileContext}
 TIME CONTEXT: ${timeContext}
@@ -802,13 +884,11 @@ Respond as ${myName}. Type like you're between meetings.`;
     ? "https://api.groq.com/openai/v1/chat/completions"
     : "https://api.openai.com/v1/chat/completions";
   const model = useGroqAPI ? groqModelName : "gpt-4o-mini";
-
   let maxTokens = 150;
   if (useGroqAPI) {
     if (groqModelName === "openai/gpt-oss-120b") maxTokens = 500;
     else maxTokens = 250;
   }
-
   const response = await fetchWithBackoff(
     () =>
       fetch(apiUrl, {
@@ -830,15 +910,12 @@ Respond as ${myName}. Type like you're between meetings.`;
     3,
     1000
   );
-
   if (!response.ok) {
     const bodyText = await response.text();
     throw new Error(`${useGroqAPI ? "Groq" : "OpenAI"} API Error ${response.status}: ${bodyText.slice(0, 500)}`);
   }
   const data = await response.json();
-
   const tokensUsed = (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0);
-
   return {
     reply: data.choices[0].message.content.trim(),
     tokensUsed,
@@ -1016,7 +1093,6 @@ async function runIteration(n: number) {
     await randomDelay(chatMin, chatMax);
     const clickable = chats[i].querySelector<HTMLElement>("a, .msg-conversation-listitem__link, [tabindex='0']");
     clickable?.click();
-
     await delay(2000);
 
     const leadName = getLeadName();
@@ -1030,7 +1106,7 @@ async function runIteration(n: number) {
 
     const fullConversation = await getOrCreateConversationHistory(leadName);
 
-    // ✅ NEW: Check conversation close state FIRST
+    // Check conversation close state FIRST
     const closeState = getConversationCloseState(fullConversation.messages);
     if (closeState.isClosed) {
       const skipCheck = shouldSkipDueToCloseState(closeState, lastMsg.content);
@@ -1041,6 +1117,10 @@ async function runIteration(n: number) {
           "Bot"
         );
         continue;
+      }
+      // ✅ NEW: Log when we decide NOT to skip despite close state
+      if (skipCheck.reason) {
+        addLog("INFO", `Engaging ${leadName}: ${skipCheck.reason}`, "Bot");
       }
     }
 
@@ -1094,7 +1174,6 @@ async function runIteration(n: number) {
           const conversationHistory = fullConversation.messages
             .map((m: MessageEntry) => `${m.speaker}: ${m.content}`)
             .join("\n");
-
           const payload: LeadWebhookPayload = {
             leadName,
             profileUrl: fullConversation.profileUrl,
@@ -1105,7 +1184,6 @@ async function runIteration(n: number) {
             messageCount: fullConversation.messages.length,
             detectedAt: new Date().toISOString(),
           };
-
           await sendLeadWebhook(payload);
           updateStats("leadsFound", 1);
           addLog(
@@ -1157,8 +1235,9 @@ async function runIteration(n: number) {
     if (input && sendBtn) {
       const conversationMeta = {
         messageCount: fullConversation.messages.length,
-        lastMessageQuestions: (fullConversation.messages[fullConversation.messages.length - 1]?.content.match(/\?/g) || [])
-          .length,
+        lastMessageQuestions:
+          (fullConversation.messages[fullConversation.messages.length - 1]?.content.match(/\?/g) || [])
+            .length,
       };
 
       const shouldSplit = shouldDoubleText(finalReply, conversationMeta);
@@ -1398,7 +1477,7 @@ chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse
     if (botRunning && !botPaused) {
       addLog("INFO", "Check unread triggered by background", "System");
     }
-    sendResponse({ status: "ok" }); 
+    sendResponse({ status: "ok" });
     return;
   }
 });
