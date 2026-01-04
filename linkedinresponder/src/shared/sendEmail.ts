@@ -1,82 +1,92 @@
 // linkedinresponder/src/shared/sendEmail.ts
+import { getBotSettings, AIProvider } from "./settings";
 
-import { getBotSettings } from "./settings";
+const DISENGAGEMENT = [
+  "not interested",
+  "no thanks",
+  "no thank",
+  "not now",
+  "too busy",
+  "maybe later",
+  "not a fit",
+  "no overlap",
+  "policy",
+  "not allowed",
+  "stop",
+  "unsubscribe",
+  "no, thank you",
+  "no thank you",
+  "no thankyou",
+  "nope",
+  "nah"
+];
 
-// ✅ UPDATED: Smart skip logic with rule-based decision making
+const SHORT_ACK = ["sure", "ok", "okay", "k", "thx", "thanks"];
+
+// API endpoint helper
+function getApiEndpoint(provider: AIProvider): string {
+  return provider === "groq"
+    ? "https://api.groq.com/openai/v1/chat/completions"
+    : "https://api.openai.com/v1/chat/completions";
+}
+
+// Model helper - uses smaller/faster models for decision tasks
+function getDecisionModel(provider: AIProvider): string {
+  return provider === "groq" ? "llama-3.3-70b-versatile" : "gpt-4o-mini";
+}
+
+// --- Decision: Should reply? ---
 export async function shouldReplyToConversation(
   apiKey: string,
   conversation: Array<{ speaker: string; message: string }>,
-  leadName: string
+  leadName: string,
+  provider: AIProvider = "openai"
 ): Promise<{ shouldReply: boolean; reason: string }> {
-  if (conversation.length === 0) {
-    return { shouldReply: false, reason: "Empty conversation" };
-  }
+  if (conversation.length === 0) return { shouldReply: false, reason: "Empty conversation" };
 
   const lastMessage = conversation[conversation.length - 1];
-  const lastMessageText = lastMessage.message.toLowerCase();
+  const lastMessageText = lastMessage.message.toLowerCase().trim();
 
-  // Get all messages from the bot (not the lead)
   const myMessages = conversation.filter((msg) => msg.speaker !== leadName);
   const theirMessages = conversation.filter((msg) => msg.speaker === leadName);
 
-  // ✅ RULE 1: Never skip if they just answered YOUR question
-  if (myMessages.length > 0) {
-    const myLastMessage = myMessages[myMessages.length - 1];
-    const myLastWasQuestion = myLastMessage.message.includes("?");
-    const theirLastIsAnswer = theirMessages[theirMessages.length - 1] === lastMessage;
+  // Hard disengagement
+  if (DISENGAGEMENT.some((p) => lastMessageText.includes(p))) {
+    return { shouldReply: false, reason: "Lead disengaged" };
+  }
 
-    const myLastIndex = conversation.findIndex((msg) => msg === myLastMessage);
-    const theirLastIndex = conversation.length - 1;
-
-    if (myLastWasQuestion && theirLastIsAnswer && theirLastIndex > myLastIndex) {
-      return {
-        shouldReply: true,
-        reason: "They answered my question - must acknowledge and continue",
-      };
+  // Short ack after my close
+  if (SHORT_ACK.includes(lastMessageText) && myMessages.length > 0) {
+    const myLast = myMessages[myMessages.length - 1].message.toLowerCase();
+    const looksLikeClose =
+      myLast.includes("no overlap") ||
+      myLast.includes("reach out if") ||
+      myLast.includes("feel free to reach out") ||
+      myLast.includes("not a fit") ||
+      myLast.includes("no problem") ||
+      myLast.includes("thanks for letting me know");
+    if (looksLikeClose) {
+      return { shouldReply: false, reason: "Ack after close" };
     }
   }
 
-  // ✅ RULE 2: Never skip on short answers if conversation is active
+  // Rule: they answered my question
+  const myLastWasQuestion = myMessages.length > 0 && myMessages[myMessages.length - 1].message.includes("?");
+  const theirLastIsAnswer = theirMessages[theirMessages.length - 1] === lastMessage;
+  const myLastIndex = myMessages.length ? conversation.findIndex((msg) => msg === myMessages[myMessages.length - 1]) : -1;
+  const theirLastIndex = conversation.length - 1;
+  if (myLastWasQuestion && theirLastIsAnswer && theirLastIndex > myLastIndex) {
+    return { shouldReply: true, reason: "They answered my question" };
+  }
+
+  // Short answer but engaged flow
   const isShortAnswer = lastMessage.message.split(" ").length < 20;
   const hasRecentExchange = myMessages.length > 0 && theirMessages.length > 0;
-
   if (isShortAnswer && hasRecentExchange && myMessages.length >= 2) {
-    return {
-      shouldReply: true,
-      reason: "Short but engaged response - continuing conversation flow",
-    };
+    return { shouldReply: true, reason: "Short but engaged response" };
   }
 
-  // ✅ RULE 3: Only skip on explicit disengagement phrases
-  const disengagementPhrases = [
-    "not interested",
-    "no thanks",
-    "not right now",
-    "too busy right now",
-    "maybe later",
-    "not a fit",
-    "not looking",
-    "thanks but no",
-    "appreciate it but",
-    "not what we need",
-    "have a great day",
-    "talk soon",
-    "take care",
-    "bye",
-    "goodbye",
-    "gotta go",
-    "catch you later",
-  ];
-
-  const hasDisengagement = disengagementPhrases.some((phrase) => lastMessageText.includes(phrase));
-  if (hasDisengagement) {
-    return {
-      shouldReply: false,
-      reason: "Lead explicitly disengaged or ended conversation",
-    };
-  }
-
-  // ✅ Check for positive engagement signals
+  // Positive engagement signals
   const engagementSignals = [
     "yes",
     "yeah",
@@ -93,18 +103,14 @@ export async function shouldReplyToConversation(
     "would love to",
     "want to know",
     "curious about",
-    "?", // Questions are engagement
+    "?"
   ];
-
   const hasEngagement = engagementSignals.some((signal) => lastMessageText.includes(signal));
   if (hasEngagement) {
-    return {
-      shouldReply: true,
-      reason: "Positive engagement detected - they're interested",
-    };
+    return { shouldReply: true, reason: "Positive engagement detected" };
   }
 
-  // ✅ RULE 4: Use AI as fallback for complex cases
+  // AI fallback
   const conversationText = conversation
     .slice(-20)
     .map((msg) => `${msg.speaker}: ${msg.message}`)
@@ -117,37 +123,28 @@ ${conversationText}
 
 CONTEXT: The lead just sent: "${lastMessage.message}"
 
-Analyze if you should reply:
+Rules:
+- REPLY if they asked a question, answered my question, or showed interest.
+- SKIP if they rejected, said no, not interested, policy/no allowance, or gave a short acknowledgment after my closing message.
+- Be biased to REPLY only when there's real engagement; otherwise SKIP.
 
-REPLY if:
-- They asked a question (even indirectly)
-- They shared useful information expecting feedback
-- They answered YOUR question and conversation should continue
-- They showed interest or curiosity
-- Natural conversation flow requires acknowledgment
-
-SKIP ONLY if:
-- They gave a hard "no" or clear rejection
-- They said goodbye and closed the conversation
-- They gave a pure acknowledgment with no follow-up needed (like "ok thanks")
-- Replying would seem pushy after their closure statement
-
-Respond ONLY with this format:
+Respond ONLY with:
 REPLY: [one sentence reason]
 OR
-SKIP: [one sentence reason]
-
-Be biased toward REPLY unless there's clear disengagement.`;
+SKIP: [one sentence reason]`;
 
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const apiUrl = getApiEndpoint(provider);
+    const model = getDecisionModel(provider);
+
+    const res = await fetch(apiUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model,
         messages: [{ role: "user", content: decisionPrompt }],
         temperature: 0.2,
         max_tokens: 60,
@@ -155,32 +152,27 @@ Be biased toward REPLY unless there's clear disengagement.`;
     });
 
     if (!res.ok) {
-      return {
-        shouldReply: true,
-        reason: "AI check failed - defaulting to reply",
-      };
+      console.error(`❌ ${provider.toUpperCase()} API error in shouldReplyToConversation: ${res.status}`);
+      return { shouldReply: true, reason: "AI check failed - defaulting to reply" };
     }
 
     const data = await res.json();
     const reply = data.choices?.[0]?.message?.content?.trim() || "";
-
     const shouldReply = reply.toUpperCase().startsWith("REPLY");
     const reason = reply.split(":")[1]?.trim() || "AI decision";
-
     return { shouldReply, reason };
   } catch (err) {
     console.error("❌ AI decision check failed:", err);
-    return {
-      shouldReply: true,
-      reason: "AI error - defaulting to engage",
-    };
+    return { shouldReply: true, reason: "AI error - defaulting to engage" };
   }
 }
 
+// --- Lead qualification ---
 export async function checkPositiveLead(
   apiKey: string,
   leadPrompt: string,
-  lastTwoMessages: string[]
+  lastTwoMessages: string[],
+  provider: AIProvider = "openai"
 ): Promise<boolean> {
   const prompt = `You are an AI assistant helping identify qualified leads.
 Rule: ${leadPrompt}
@@ -188,19 +180,27 @@ Analyze the following two LinkedIn messages: ${lastTwoMessages.join("\n")}
 Respond with only one word: "yes" or "no".`;
 
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const apiUrl = getApiEndpoint(provider);
+    const model = getDecisionModel(provider);
+
+    const res = await fetch(apiUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model,
         messages: [{ role: "user", content: prompt }],
         temperature: 0,
         max_tokens: 10,
       }),
     });
+
+    if (!res.ok) {
+      console.error(`❌ ${provider.toUpperCase()} API error in checkPositiveLead: ${res.status}`);
+      return false;
+    }
 
     const data = await res.json();
     const reply = data.choices?.[0]?.message?.content?.trim().toLowerCase();
@@ -211,66 +211,39 @@ Respond with only one word: "yes" or "no".`;
   }
 }
 
-// ✅ Send email using Resend REST API (reads key from settings instead of hardcoding)
-export async function sendLeadAlertEmail(leadName: string, conversation: string, recipientEmail: string) {
-  const { resendApiKey } = await getBotSettings();
+// --- Lead Webhook Payload Type ---
+export interface LeadWebhookPayload {
+  leadName: string;
+  profileUrl: string;
+  company: string;
+  jobTitle: string;
+  headline: string;
+  conversationHistory: string;
+  messageCount: number;
+  detectedAt: string;
+}
 
-  if (!resendApiKey || resendApiKey.trim().length === 0) {
-    // Keep behavior safe: if no key configured, don't send and surface a clear error
-    throw new Error("Resend API key is not set in Options. Please configure resendApiKey.");
+// --- Send lead data to Zapier webhook ---
+export async function sendLeadWebhook(payload: LeadWebhookPayload): Promise<void> {
+  const { webhookUrl } = await getBotSettings();
+  
+  if (!webhookUrl || webhookUrl.trim().length === 0) {
+    throw new Error("Webhook URL is not configured. Please set it in Options.");
   }
 
-  const response = await fetch("https://api.resend.com/emails", {
+  const response = await fetch(webhookUrl, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${resendApiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      from: "LinkedIn AI Bot <onboarding@resend.dev>",
-      to: [recipientEmail],
-      subject: `🔥 Hot Lead: ${leadName}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h1 style="color: #0066cc; border-bottom: 3px solid #0066cc; padding-bottom: 10px;">
-            🎯 New Qualified Lead Alert
-          </h1>
-
-          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h2 style="color: #333; margin-top: 0;">Lead Name</h2>
-            <p style="font-size: 18px; font-weight: bold; color: #0066cc;">${leadName}</p>
-          </div>
-
-          <div style="background: white; border: 1px solid #ddd; padding: 20px; border-radius: 8px;">
-            <h2 style="color: #333;">Conversation History</h2>
-            <div style="white-space: pre-wrap; font-family: 'Courier New', monospace; font-size: 14px; line-height: 1.6; background: #f9f9f9; padding: 15px; border-left: 4px solid #0066cc; overflow-x: auto;">
-${conversation}
-            </div>
-          </div>
-
-          <div style="margin-top: 30px; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 8px; text-align: center;">
-            <h3 style="margin: 0 0 10px 0;">Next Steps</h3>
-            <p style="margin: 0; font-size: 14px;">
-              Review the conversation and follow up with <strong>${leadName}</strong> on LinkedIn.
-            </p>
-          </div>
-
-          <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #999; font-size: 12px;">
-            <p>Sent by LinkedIn AI Responder</p>
-            <p>Automated lead notification system</p>
-          </div>
-        </div>
-      `,
-    }),
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => null);
-    console.error("❌ Resend API error:", errorData);
-    throw new Error(`Resend API error: ${response.status}`);
+    const errorText = await response.text().catch(() => "Unknown error");
+    console.error("❌ Webhook error:", errorText);
+    throw new Error(`Webhook error: ${response.status}`);
   }
 
-  const data = await response.json();
-  console.log("✅ Email sent via Resend:", data);
-  return data;
+  console.log("✅ Lead sent to webhook successfully");
 }

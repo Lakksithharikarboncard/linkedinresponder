@@ -1,11 +1,11 @@
 // linkedinresponder/src/content/content.ts
 
 import { BotCommand, BotLogEntry, BotStats, BotStatus, MessageEntry, ConversationHistory } from "../shared/types";
-import { checkPositiveLead, sendLeadAlertEmail, shouldReplyToConversation } from "../shared/sendEmail";
+import { checkPositiveLead, sendLeadWebhook, shouldReplyToConversation, LeadWebhookPayload } from "../shared/sendEmail";
 import { generateLeadId, loadConversation, saveConversation, shouldResync } from "../shared/conversationStorage";
 import { scrapeLeadProfile, formatProfileForDisplay, formatProfileForAI } from "../shared/profileScraper";
 import { shouldDoubleText, generateDoubleText, calculateDoubleTextDelay } from "../shared/doubleTextHandler";
-import { getBotSettings } from "../shared/settings";
+import { getBotSettings, AIProvider } from "../shared/settings";
 
 type ContentCommand =
   | BotCommand
@@ -18,7 +18,7 @@ type ContentCommand =
 
 // --- STATE VARIABLES ---
 let botRunning = false;
-let botPaused = false; // ✅ NEW: Pause state
+let botPaused = false;
 let botLoopTimeout: number | null = null;
 let stats: BotStats = {
   chatsProcessed: 0,
@@ -33,67 +33,51 @@ let useStrictHours = true;
 let useGroq = false;
 let groqModel = "llama-3.3-70b-versatile";
 
-// ✅ NEW: Reply preview state
 let replyPreviewEnabled = false;
 let pendingReplyResolve: ((approved: { approved: boolean; reply: string }) => void) | null = null;
 let blacklist: string[] = [];
 
-// --- HELPER FUNCTIONS FOR CONTEXT-AWARE PROMPTING ---
-function getTimeContext(): string {
-  const hour = new Date().getHours();
-  const day = new Date().getDay();
+// --- CONSTANTS / GUARDS ---
+const HEADLINE_BLACKLIST = ["student", "intern", "seeking", "open to work", "looking for", "hiring"];
+const CLOSE_COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+const CLOSE_PATTERNS = [
+  "no overlap",
+  "not a fit",
+  "reach out if",
+  "feel free to reach out",
+  "thanks for letting me know",
+  "no problem",
+  "happy to stay connected",
+];
 
-  if (day === 0 || day === 6) return "Weekend - keep it casual and light";
-  if (hour < 12) return "Morning - people are busy, be concise";
-  if (hour < 17) return "Afternoon - normal business hours";
-  return "Evening - they might not respond until tomorrow";
+// --- HELPERS ---
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-function getConversationAge(messages: MessageEntry[]): string {
-  if (messages.length < 2) return "First exchange - establish rapport";
-
-  const firstMsg = messages[0].timestamp;
-  const daysSince = Math.floor((Date.now() - firstMsg) / (1000 * 60 * 60 * 24));
-
-  if (daysSince === 0) return "New conversation today";
-  if (daysSince === 1) return "Ongoing conversation";
-  if (daysSince > 7) return "Old conversation - re-engage carefully";
-  return `${daysSince}-day conversation`;
+function delay(ms: number) {
+  return new Promise<void>((res) => setTimeout(res, ms));
 }
 
-function getResponsePattern(messages: MessageEntry[]): string {
-  const theirMessages = messages.filter((m) => m.type === "received");
-  if (theirMessages.length === 0) return "Unknown";
-
-  const avgLength =
-    theirMessages.reduce((sum, m) => sum + m.content.split(" ").length, 0) / theirMessages.length;
-
-  if (avgLength < 10) return "SHORT replies (5-10 words) - match that brevity";
-  if (avgLength < 25) return "MEDIUM replies (10-25 words) - similar length";
-  return "LONG replies (25+ words) - you can elaborate more";
-}
-
-function getToneGuidance(profile: any): string {
-  if (!profile || !profile.jobTitle) return "Professional but friendly";
-
-  const title = profile.jobTitle.toLowerCase();
-
-  if (title.includes("ceo") || title.includes("founder") || title.includes("president")) {
-    return "EXECUTIVE - Be direct, concise, value-focused. No fluff.";
+async function fetchWithBackoff(
+  fn: () => Promise<Response>,
+  maxRetries = 3,
+  baseDelayMs = 1000
+): Promise<Response> {
+  let attempt = 0;
+  while (true) {
+    const res = await fn();
+    if (res.ok) return res;
+    if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
+      const backoffDelay = baseDelayMs * 2 ** attempt + Math.random() * 400;
+      await sleep(backoffDelay);
+      attempt++;
+      continue;
+    }
+    return res;
   }
-
-  if (title.includes("director") || title.includes("vp") || title.includes("head")) {
-    return "SENIOR LEADER - Professional, strategic. Focus on ROI.";
-  }
-
-  if (title.includes("engineer") || title.includes("developer")) {
-    return "TECHNICAL - Be specific, mention features. Avoid sales speak.";
-  }
-
-  return "PROFESSIONAL - Warm, helpful, consultative.";
 }
 
-// --- LOGGING & STATS HELPERS ---
 function addLog(
   type: "INFO" | "ACTION" | "ERROR" | "SUCCESS" | "WARNING",
   message: string,
@@ -106,19 +90,9 @@ function addLog(
 }
 
 function updateStats(key: keyof BotStats, value: number | string) {
-  if (key === "startTime") {
-    stats.startTime = value as number;
-  } else if (key === "currentModel") {
-    stats.currentModel = value as string;
-  } else {
-    // ✅ FIX: All numeric stats now consistently ADD
-    (stats[key] as number) += value as number;
-  }
-}
-
-// --- UTILS ---
-function delay(ms: number) {
-  return new Promise<void>((res) => setTimeout(res, ms));
+  if (key === "startTime") stats.startTime = value as number;
+  else if (key === "currentModel") stats.currentModel = value as string;
+  else (stats[key] as number) += value as number;
 }
 
 function calculateTypingDelay(text: string): number {
@@ -133,11 +107,16 @@ function isWithinWorkingHours(startHour: number = 9, endHour: number = 18): bool
   return currentHour >= startHour && currentHour < endHour;
 }
 
-async function humanType(input: HTMLElement, text: string) {
+// Set editable text via execCommand (works with LinkedIn's React)
+async function setEditableText(input: HTMLElement, text: string) {
   input.focus();
+  await delay(50);
+
+  // Select all and delete existing content
   document.execCommand("selectAll", false, "");
   document.execCommand("delete", false, "");
 
+  // Type character by character
   for (const char of text) {
     document.execCommand("insertText", false, char);
     const charDelay = Math.random() > 0.9 ? 150 : 30 + Math.random() * 50;
@@ -158,13 +137,17 @@ async function humanScroll() {
 async function scrollConversationList(times: number = 5) {
   const container = document.querySelector<HTMLElement>(".msg-conversations-container--inbox-shortcuts");
   if (!container) return;
-
   for (let i = 0; i < times; i++) {
     container.scrollBy({ top: Math.random() * 200 + 100, behavior: "smooth" });
     await delay(500 + Math.random() * 800);
     container.scrollBy({ top: -(Math.random() * 50), behavior: "smooth" });
     await delay(400 + Math.random() * 500);
   }
+}
+
+// Helper to get API key for a specific provider
+function getApiKeyForProvider(provider: AIProvider, apiKey: string, groqApiKey: string): string {
+  return provider === "groq" ? groqApiKey : apiKey;
 }
 
 async function getSettings(): Promise<{
@@ -176,9 +159,12 @@ async function getSettings(): Promise<{
   loopMax: number;
   prompt: string;
   leadPrompt: string;
-  targetEmail: string;
+  webhookUrl: string;
   startHour: number;
   endHour: number;
+  replyProvider: AIProvider;
+  decisionProvider: AIProvider;
+  leadDetectionProvider: AIProvider;
 }> {
   const s = await getBotSettings();
   return {
@@ -190,9 +176,12 @@ async function getSettings(): Promise<{
     loopMax: s.loopMaxDelay,
     prompt: s.replyPrompt,
     leadPrompt: s.leadPrompt,
-    targetEmail: s.targetEmail,
+    webhookUrl: s.webhookUrl,
     startHour: s.startHour,
     endHour: s.endHour,
+    replyProvider: s.replyProvider,
+    decisionProvider: s.decisionProvider,
+    leadDetectionProvider: s.leadDetectionProvider,
   };
 }
 
@@ -231,14 +220,11 @@ function getLastMessage(leadName: string): { fromLead: boolean; content: string 
 async function scrollToLoadAllMessages() {
   const messagePane = document.querySelector<HTMLElement>(".msg-s-message-list-content");
   if (!messagePane) return;
-
   let previousHeight = 0;
   let currentHeight = messagePane.scrollHeight;
   let attempts = 0;
   const maxAttempts = 50;
-
   addLog("INFO", "Loading full conversation history...", "System");
-
   while (currentHeight > previousHeight && attempts < maxAttempts) {
     previousHeight = currentHeight;
     messagePane.scrollTo({ top: 0, behavior: "smooth" });
@@ -246,41 +232,29 @@ async function scrollToLoadAllMessages() {
     currentHeight = messagePane.scrollHeight;
     attempts++;
   }
-
   addLog("INFO", `Loaded ${attempts} message batches`, "System");
 }
 
 async function getCompleteConversation(leadName: string): Promise<MessageEntry[]> {
   await scrollToLoadAllMessages();
-
   const events = Array.from(document.querySelectorAll("li.msg-s-message-list__event"));
   const messages: MessageEntry[] = [];
-
   for (const msgEl of events) {
     const senderEl = msgEl.querySelector("span.msg-s-message-group__name");
     const contentEl = msgEl.querySelector("p.msg-s-event-listitem__body");
     const timeEl = msgEl.querySelector("time");
-
     if (senderEl && contentEl) {
       const speaker = senderEl.textContent?.trim() || "Unknown";
       const content = contentEl.textContent?.trim() || "";
-
       let timestamp = Date.now();
       if (timeEl) {
         const dateTimeAttr = timeEl.getAttribute("datetime");
-        if (dateTimeAttr) {
-          timestamp = new Date(dateTimeAttr).getTime();
-        }
+        if (dateTimeAttr) timestamp = new Date(dateTimeAttr).getTime();
       }
-
       const type = speaker.includes(leadName) ? "received" : "sent";
-
-      if (content) {
-        messages.push({ speaker, content, timestamp, type });
-      }
+      if (content) messages.push({ speaker, content, timestamp, type });
     }
   }
-
   return messages;
 }
 
@@ -289,7 +263,6 @@ async function getOrCreateConversationHistory(leadName: string): Promise<Convers
   const leadId = generateLeadId(leadName, profileUrl);
 
   let existingConvo = await loadConversation(leadId);
-
   if (existingConvo && !shouldResync(existingConvo)) {
     addLog(
       "INFO",
@@ -351,6 +324,12 @@ async function fetchReply(
   const toneGuidance = getToneGuidance(leadProfile);
   const profileContext = leadProfile ? `\n\nLEAD PROFILE:\n${formatProfileForAI(leadProfile)}\n` : "";
 
+  // Build the user prompt with variable replacements
+  const userPrompt = prompt
+    .replace("{extracted_text}", conversationText)
+    .replace("{user_name}", leadName)
+    .replace("{lead_headline}", leadProfile?.headline || "Unknown");
+
   const systemPrompt = `You are a real professional messaging on LinkedIn (NOT an AI assistant).
 ${profileContext}
 TIME CONTEXT: ${timeContext}
@@ -362,7 +341,7 @@ CONVERSATION (${fullHistory.length} total messages, showing last ${recentMessage
 ${conversationText}
 
 USER'S INSTRUCTIONS:
-${prompt.replace("{extracted_text}", conversationText).replace("{user_name}", leadName)}
+${userPrompt}
 
 CRITICAL REALISM RULES:
 1. LENGTH: 15-30 words. Real people are busy.
@@ -385,33 +364,36 @@ Respond as ${myName}. Type like you're between meetings.`;
 
   let maxTokens = 150;
   if (useGroqAPI) {
-    if (groqModelName === "openai/gpt-oss-120b") {
-      maxTokens = 500;
-    } else if (groqModelName === "moonshotai/kimi-k2-instruct-0905") {
-      maxTokens = 250;
-    } else {
-      maxTokens = 250;
-    }
+    if (groqModelName === "openai/gpt-oss-120b") maxTokens = 500;
+    else maxTokens = 250;
   }
 
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...recentMessages.map((msg) => ({
-          role: msg.type === "received" ? "user" : "assistant",
-          content: msg.content,
-        })),
-      ],
-      max_tokens: maxTokens,
-      temperature: 0.7,
-    }),
-  });
+  const response = await fetchWithBackoff(
+    () =>
+      fetch(apiUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...recentMessages.map((msg) => ({
+              role: msg.type === "received" ? "user" : "assistant",
+              content: msg.content,
+            })),
+          ],
+          max_tokens: maxTokens,
+          temperature: 0.7,
+        }),
+      }),
+    3,
+    1000
+  );
 
-  if (!response.ok) throw new Error(`${useGroqAPI ? "Groq" : "OpenAI"} API Error`);
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`${useGroqAPI ? "Groq" : "OpenAI"} API Error ${response.status}: ${bodyText.slice(0, 500)}`);
+  }
   const data = await response.json();
 
   const tokensUsed = (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0);
@@ -420,6 +402,50 @@ Respond as ${myName}. Type like you're between meetings.`;
     reply: data.choices[0].message.content.trim(),
     tokensUsed,
   };
+}
+
+function getTimeContext(): string {
+  const hour = new Date().getHours();
+  const day = new Date().getDay();
+  if (day === 0 || day === 6) return "Weekend - keep it casual and light";
+  if (hour < 12) return "Morning - people are busy, be concise";
+  if (hour < 17) return "Afternoon - normal business hours";
+  return "Evening - they might not respond until tomorrow";
+}
+
+function getConversationAge(messages: MessageEntry[]): string {
+  if (messages.length < 2) return "First exchange - establish rapport";
+  const firstMsg = messages[0].timestamp;
+  const daysSince = Math.floor((Date.now() - firstMsg) / (1000 * 60 * 60 * 24));
+  if (daysSince === 0) return "New conversation today";
+  if (daysSince === 1) return "Ongoing conversation";
+  if (daysSince > 7) return "Old conversation - re-engage carefully";
+  return `${daysSince}-day conversation`;
+}
+
+function getResponsePattern(messages: MessageEntry[]): string {
+  const theirMessages = messages.filter((m) => m.type === "received");
+  if (theirMessages.length === 0) return "Unknown";
+  const avgLength =
+    theirMessages.reduce((sum: number, m: MessageEntry) => sum + m.content.split(" ").length, 0) / theirMessages.length;
+  if (avgLength < 10) return "SHORT replies (5-10 words) - match that brevity";
+  if (avgLength < 25) return "MEDIUM replies (10-25 words) - similar length";
+  return "LONG replies (25+ words) - you can elaborate more";
+}
+
+function getToneGuidance(profile: any): string {
+  if (!profile || !profile.jobTitle) return "Professional but friendly";
+  const title = profile.jobTitle.toLowerCase();
+  if (title.includes("ceo") || title.includes("founder") || title.includes("president")) {
+    return "EXECUTIVE - Be direct, concise, value-focused. No fluff.";
+  }
+  if (title.includes("director") || title.includes("vp") || title.includes("head")) {
+    return "SENIOR LEADER - Professional, strategic. Focus on ROI.";
+  }
+  if (title.includes("engineer") || title.includes("developer")) {
+    return "TECHNICAL - Be specific, mention features. Avoid sales speak.";
+  }
+  return "PROFESSIONAL - Warm, helpful, consultative.";
 }
 
 function getMyName(): string {
@@ -441,32 +467,29 @@ function getModelDisplayName(modelId: string): string {
   return modelNames[modelId] || modelId;
 }
 
-// ✅ NEW: Check if lead is blacklisted
+// Helper to get provider display name
+function getProviderDisplayName(provider: AIProvider): string {
+  return provider === "groq" ? "Groq" : "OpenAI";
+}
+
 function isBlacklisted(leadName: string, profile: any): boolean {
   const checkStrings = [
     leadName.toLowerCase(),
     profile?.company?.toLowerCase() || "",
     profile?.jobTitle?.toLowerCase() || "",
   ];
-
   for (const entry of blacklist) {
     const entryLower = entry.toLowerCase();
     for (const check of checkStrings) {
-      if (check && check.includes(entryLower)) {
-        return true;
-      }
+      if (check && check.includes(entryLower)) return true;
     }
   }
   return false;
 }
 
-// ✅ NEW: Wait for reply approval from popup
 async function waitForReplyApproval(leadName: string, reply: string): Promise<{ approved: boolean; reply: string }> {
   return new Promise((resolve) => {
-    // Store the resolve function so it can be called from message handler
     pendingReplyResolve = resolve;
-
-    // Store pending reply in storage for popup to access
     chrome.storage.local.set({
       pendingReply: {
         leadName,
@@ -474,10 +497,7 @@ async function waitForReplyApproval(leadName: string, reply: string): Promise<{ 
         timestamp: Date.now(),
       },
     });
-
     addLog("INFO", `Waiting for approval to reply to ${leadName}...`, "System");
-
-    // Timeout after 5 minutes - auto-reject
     setTimeout(() => {
       if (pendingReplyResolve) {
         addLog("WARNING", `Reply approval timed out for ${leadName}`, "System");
@@ -489,18 +509,69 @@ async function waitForReplyApproval(leadName: string, reply: string): Promise<{ 
   });
 }
 
+async function waitForElement<T extends Element>(selector: string, tries = 6, delayMs = 400): Promise<T | null> {
+  for (let i = 0; i < tries; i++) {
+    const el = document.querySelector<T>(selector);
+    if (el) return el;
+    await delay(delayMs);
+  }
+  return null;
+}
+
+function getLastCloseTimestamp(messages: MessageEntry[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.type === "sent") {
+      const lower = m.content.toLowerCase();
+      if (CLOSE_PATTERNS.some((p) => lower.includes(p))) {
+        return m.timestamp;
+      }
+    }
+  }
+  return null;
+}
+
+function isShortAckNoQuestion(msg: string): boolean {
+  const t = msg.toLowerCase().trim();
+  if (t.includes("?")) return false;
+  return t.split(" ").length <= 3;
+}
+
+function headlineIsIrrelevant(headline: string): boolean {
+  if (!headline || headline === "Unknown") return true;
+  const lower = headline.toLowerCase();
+  return HEADLINE_BLACKLIST.some((w) => lower.includes(w));
+}
+
 // --- MAIN LOOP ---
 async function runIteration(n: number) {
   addLog("INFO", `Starting batch of ${n} chats...`, "System");
 
-  const { apiKey, groqApiKey, chatMin, chatMax, loopMin, loopMax, prompt, leadPrompt, targetEmail, startHour, endHour } =
-    await getSettings();
+  const {
+    apiKey,
+    groqApiKey,
+    chatMin,
+    chatMax,
+    loopMin,
+    loopMax,
+    prompt,
+    leadPrompt,
+    webhookUrl,
+    startHour,
+    endHour,
+    replyProvider,
+    decisionProvider,
+    leadDetectionProvider,
+  } = await getSettings();
 
-  const activeApiKey = useGroq ? groqApiKey : apiKey;
-  const currentModelName = useGroq ? groqModel : "gpt-4o-mini";
+  // Get API keys for each function based on provider settings
+  const replyApiKey = getApiKeyForProvider(replyProvider, apiKey, groqApiKey);
+  const decisionApiKey = getApiKeyForProvider(decisionProvider, apiKey, groqApiKey);
+  const leadDetectionApiKey = getApiKeyForProvider(leadDetectionProvider, apiKey, groqApiKey);
+
+  const currentModelName = replyProvider === "groq" ? groqModel : "gpt-4o-mini";
   updateStats("currentModel", getModelDisplayName(currentModelName));
 
-  // ✅ Load blacklist from storage
   const storageData = await chrome.storage.local.get(["blacklist"]);
   blacklist = storageData.blacklist || [];
 
@@ -522,11 +593,9 @@ async function runIteration(n: number) {
   addLog("INFO", `Found ${chats.length} conversations to check.`, "Bot");
 
   for (let i = 0; i < chats.length && botRunning; i++) {
-    // ✅ NEW: Check if paused
     while (botPaused && botRunning) {
       await delay(1000);
     }
-
     if (!botRunning) break;
 
     await humanScroll();
@@ -547,7 +616,22 @@ async function runIteration(n: number) {
 
     const fullConversation = await getOrCreateConversationHistory(leadName);
 
-    // ✅ NEW: Check blacklist
+    // Headline relevance guard
+    const headline = fullConversation.profile?.headline || "Unknown";
+    if (headlineIsIrrelevant(headline)) {
+      if (!lastMsg.content.includes("?") && lastMsg.content.split(" ").length < 12) {
+        addLog("INFO", `Skipping ${leadName}: Irrelevant or unknown headline`, "Bot");
+        continue;
+      }
+    }
+
+    // Cooldown after a close
+    const lastCloseAt = getLastCloseTimestamp(fullConversation.messages);
+    if (lastCloseAt && Date.now() - lastCloseAt < CLOSE_COOLDOWN_MS && isShortAckNoQuestion(lastMsg.content)) {
+      addLog("INFO", `Skipping ${leadName}: Recent close cooldown active`, "Bot");
+      continue;
+    }
+
     if (isBlacklisted(leadName, fullConversation.profile)) {
       addLog("WARNING", `Skipping ${leadName}: Blacklisted`, "Bot");
       continue;
@@ -561,58 +645,81 @@ async function runIteration(n: number) {
       continue;
     }
 
-    const recentForDecision = fullConversation.messages.slice(-8).map((m) => ({ speaker: m.speaker, message: m.content }));
+    const recentForDecision = fullConversation.messages
+      .slice(-8)
+      .map((m: MessageEntry) => ({ speaker: m.speaker, message: m.content }));
 
     let decision;
     try {
-      decision = await shouldReplyToConversation(activeApiKey, recentForDecision, leadName);
+      decision = await shouldReplyToConversation(decisionApiKey, recentForDecision, leadName, decisionProvider);
       addLog(
         "ACTION",
-        `AI Decision for ${leadName}: ${decision.shouldReply ? "REPLY" : "SKIP"} (${decision.reason})`,
+        `AI Decision for ${leadName}: ${decision.shouldReply ? "REPLY" : "SKIP"} (${decision.reason}) [${getProviderDisplayName(decisionProvider)}]`,
         "Bot"
       );
     } catch (e) {
-      addLog("ERROR", `AI Decision Failed: ${getErrorMsg(e)}`, "System");
+      addLog("ERROR", `AI Decision Failed (${getProviderDisplayName(decisionProvider)}): ${getErrorMsg(e)}`, "System");
       continue;
     }
 
     if (!decision.shouldReply) continue;
 
-    if (targetEmail) {
+    // Lead detection & webhook
+    if (webhookUrl) {
       try {
-        const recentMsgs = fullConversation.messages.slice(-2).map((m) => m.content);
-        const isPositive = await checkPositiveLead(activeApiKey, leadPrompt, recentMsgs);
+        const recentMsgs = fullConversation.messages.slice(-2).map((m: MessageEntry) => m.content);
+        const isPositive = await checkPositiveLead(leadDetectionApiKey, leadPrompt, recentMsgs, leadDetectionProvider);
         if (isPositive) {
-          const fullChat = fullConversation.messages.map((m) => `${m.speaker}: ${m.content}`).join("\n");
-          await sendLeadAlertEmail(leadName, fullChat, targetEmail);
+          const conversationHistory = fullConversation.messages
+            .map((m: MessageEntry) => `${m.speaker}: ${m.content}`)
+            .join("\n");
+
+          const payload: LeadWebhookPayload = {
+            leadName,
+            profileUrl: fullConversation.profileUrl,
+            company: fullConversation.profile?.company || "Unknown",
+            jobTitle: fullConversation.profile?.jobTitle || "Unknown",
+            headline: fullConversation.profile?.headline || "Unknown",
+            conversationHistory,
+            messageCount: fullConversation.messages.length,
+            detectedAt: new Date().toISOString(),
+          };
+
+          await sendLeadWebhook(payload);
           updateStats("leadsFound", 1);
-          addLog("SUCCESS", `HOT LEAD FOUND: ${leadName}. Email sent!`, "Bot");
+          addLog(
+            "SUCCESS",
+            `🔥 HOT LEAD: ${leadName} sent to webhook! [${getProviderDisplayName(leadDetectionProvider)}]`,
+            "Bot"
+          );
         }
       } catch (e) {
-        addLog("ERROR", `Lead check failed: ${getErrorMsg(e)}`, "System");
+        addLog(
+          "ERROR",
+          `Lead webhook failed (${getProviderDisplayName(leadDetectionProvider)}): ${getErrorMsg(e)}`,
+          "System"
+        );
       }
     }
 
     let replyData: { reply: string; tokensUsed: number };
     try {
       replyData = await fetchReply(
-        activeApiKey,
+        replyApiKey,
         prompt,
         fullConversation.messages,
         leadName,
         myName,
         fullConversation.profile,
-        useGroq,
+        replyProvider === "groq",
         groqModel
       );
-
       updateStats("tokensUsed", replyData.tokensUsed);
     } catch (e) {
-      addLog("ERROR", `Reply Generation Failed: ${getErrorMsg(e)}`, "System");
+      addLog("ERROR", `Reply Generation Failed (${getProviderDisplayName(replyProvider)}): ${getErrorMsg(e)}`, "System");
       continue;
     }
 
-    // ✅ NEW: Reply preview - wait for approval if enabled
     let finalReply = replyData.reply;
     if (replyPreviewEnabled) {
       const approval = await waitForReplyApproval(leadName, replyData.reply);
@@ -623,8 +730,8 @@ async function runIteration(n: number) {
       finalReply = approval.reply;
     }
 
-    const input = document.querySelector<HTMLElement>("div.msg-form__contenteditable[role='textbox']");
-    const sendBtn = document.querySelector<HTMLButtonElement>("button.msg-form__send-button");
+    const input = await waitForElement<HTMLElement>("div.msg-form__contenteditable[role='textbox']", 6, 400);
+    const sendBtn = await waitForElement<HTMLButtonElement>("button.msg-form__send-button", 6, 400);
 
     if (input && sendBtn) {
       const conversationMeta = {
@@ -641,11 +748,10 @@ async function runIteration(n: number) {
 
         const typingDelay1 = calculateTypingDelay(doubleTextPattern.firstMessage);
         await delay(typingDelay1);
-        await humanType(input, doubleTextPattern.firstMessage);
+        await setEditableText(input, doubleTextPattern.firstMessage);
         await delay(800);
 
-        const isDisabled1 = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
-        if (!isDisabled1) {
+        if (!sendBtn.hasAttribute("disabled") && !sendBtn.classList.contains("disabled")) {
           sendBtn.click();
           await delay(500);
 
@@ -655,11 +761,10 @@ async function runIteration(n: number) {
 
           const typingDelay2 = calculateTypingDelay(doubleTextPattern.secondMessage);
           await delay(typingDelay2);
-          await humanType(input, doubleTextPattern.secondMessage);
+          await setEditableText(input, doubleTextPattern.secondMessage);
           await delay(800);
 
-          const isDisabled2 = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
-          if (!isDisabled2) {
+          if (!sendBtn.hasAttribute("disabled") && !sendBtn.classList.contains("disabled")) {
             sendBtn.click();
             await delay(500);
 
@@ -692,18 +797,23 @@ async function runIteration(n: number) {
               `Double-texted ${formatProfileForDisplay(leadName, fullConversation.profile)} (${getModelDisplayName(currentModelName)}) [History: ${fullConversation.messages.length} msgs]`,
               "Bot"
             );
+          } else {
+            addLog("ERROR", `Send button disabled for second message to ${leadName}`, "System");
           }
+        } else {
+          addLog("ERROR", `Send button disabled for ${leadName}`, "System");
         }
       } else {
         const typingDelay = calculateTypingDelay(finalReply);
         addLog("ACTION", `Typing reply to ${leadName} (waiting ${Math.round(typingDelay / 1000)}s)...`, "Bot");
         await delay(typingDelay);
 
-        await humanType(input, finalReply);
+        await setEditableText(input, finalReply);
         await delay(800);
 
-        const isDisabled = sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled");
-        if (!isDisabled) {
+        if (sendBtn.hasAttribute("disabled") || sendBtn.classList.contains("disabled")) {
+          addLog("ERROR", `Send button disabled for ${leadName}`, "System");
+        } else {
           sendBtn.click();
           await delay(500);
 
@@ -732,12 +842,10 @@ async function runIteration(n: number) {
           } else {
             addLog("WARNING", `Message may not have sent to ${leadName}`, "System");
           }
-        } else {
-          addLog("ERROR", `Send button disabled for ${leadName}`, "System");
         }
       }
     } else {
-      addLog("ERROR", "Could not find chat input box", "System");
+      addLog("ERROR", "Could not find chat input or send button", "System");
     }
 
     await randomDelay(chatMin, chatMax);
@@ -801,7 +909,7 @@ chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse
 
       addLog(
         "INFO",
-        `Bot started (Provider: ${useGroq ? "Groq" : "OpenAI"}, Strict Hours: ${useStrictHours ? "ON" : "OFF"}, Preview: ${replyPreviewEnabled ? "ON" : "OFF"})`,
+        `Bot started (Strict Hours: ${useStrictHours ? "ON" : "OFF"}, Preview: ${replyPreviewEnabled ? "ON" : "OFF"})`,
         "User"
       );
       runIteration(msg.config?.nChats ?? 10);
@@ -821,7 +929,6 @@ chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse
     return;
   }
 
-  // ✅ NEW: Pause handler
   if (msg.type === "PAUSE_BOT") {
     if (botRunning && !botPaused) {
       botPaused = true;
@@ -833,7 +940,6 @@ chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse
     return;
   }
 
-  // ✅ NEW: Resume handler
   if (msg.type === "RESUME_BOT") {
     if (botRunning && botPaused) {
       botPaused = false;
@@ -845,7 +951,6 @@ chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse
     return;
   }
 
-  // ✅ NEW: Approve reply handler
   if (msg.type === "APPROVE_REPLY") {
     if (pendingReplyResolve) {
       addLog("SUCCESS", `Reply to ${msg.leadName} approved`, "User");
@@ -857,7 +962,6 @@ chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse
     return;
   }
 
-  // ✅ NEW: Reject reply handler
   if (msg.type === "REJECT_REPLY") {
     if (pendingReplyResolve) {
       addLog("INFO", `Reply to ${msg.leadName} rejected`, "User");
@@ -869,7 +973,6 @@ chrome.runtime.onMessage.addListener((msg: ContentCommand, _sender, sendResponse
     return;
   }
 
-  // Handle CHECK_UNREAD from background script
   if (msg.type === "CHECK_UNREAD") {
     if (botRunning && !botPaused) {
       addLog("INFO", "Check unread triggered by background", "System");

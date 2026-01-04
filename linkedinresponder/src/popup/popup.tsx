@@ -52,14 +52,25 @@ const Popup = () => {
   const statusIntervalRef = useRef<number | null>(null);
   const storageFallbackIntervalRef = useRef<number | null>(null);
 
+  const isMessagingUrl = (url?: string) =>
+    !!url && /https:\/\/(www\.)?linkedin\.com\/messaging/i.test(url);
+
   const sendToContent = async (msg: BotCommand | any): Promise<any> => {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tabs[0]?.id) throw new Error("No active tab");
+    const tab = tabs[0];
+    if (!tab?.id || !isMessagingUrl(tab.url)) {
+      setErrorMsg("Open LinkedIn Messaging and try again");
+      return null;
+    }
 
     return new Promise((resolve) => {
-      chrome.tabs.sendMessage(tabs[0].id!, msg, (response) => {
-        if (chrome.runtime.lastError) resolve(null);
-        else resolve(response);
+      chrome.tabs.sendMessage(tab.id!, msg, (response) => {
+        if (chrome.runtime.lastError) {
+          setErrorMsg("Content script not detected. Refresh LinkedIn Messaging.");
+          resolve(null);
+        } else {
+          resolve(response);
+        }
       });
     });
   };
@@ -224,13 +235,23 @@ const Popup = () => {
 
   const handleStart = async () => {
     setLoading(true);
-    await sendToContent({
-      type: "START_BOT",
-      config: { nChats, model, useGroq, groqModel, strictHours, replyPreviewEnabled },
-    });
-    setRunning(true);
-    setPaused(false);
-    setLoading(false);
+    try {
+      const res = await sendToContent({
+        type: "START_BOT",
+        config: { nChats, model, useGroq, groqModel, strictHours, replyPreviewEnabled },
+      });
+      if (res && res.status === "ok") {
+        setRunning(true);
+        setPaused(false);
+        setErrorMsg(null);
+      } else if (!res) {
+        // errorMsg already set in sendToContent
+      } else {
+        setErrorMsg(res.error || "Unable to start");
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handlePause = async () => {
@@ -996,7 +1017,7 @@ function IconTerminal({ size = 16, color = "#000" }: { size?: number; color?: st
 function IconExport({ size = 14, color = "#000" }: { size?: number; color?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
-      <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2v9.67z"/>
+    <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2v9.67z"/>
     </svg>
   );
 }

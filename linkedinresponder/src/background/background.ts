@@ -1,47 +1,31 @@
-// linkedinresponder/src/background/background.ts
-//
-// Purpose: Service worker for the Chrome extension
-// Responsibilities:
-//   - Periodic scan alarms
-//   - Bot state persistence
-//   - Message routing between popup and content scripts
-//
-// Note: All reply generation logic lives in content.ts
-//       This file is intentionally minimal.
-
 import { getBotSettings } from "../shared/settings";
 
-// --- STATE ---
 let botEnabled = false;
 
-// --- INITIALIZATION ---
 async function initialize() {
-  // Load persisted bot state
   const result = await chrome.storage.local.get(["botEnabled"]);
   botEnabled = result.botEnabled ?? false;
-
   console.log(`[Background] Initialized. Bot enabled: ${botEnabled}`);
 }
-
 initialize();
 
-// --- STORAGE LISTENER ---
-// Keep local state in sync if changed elsewhere (e.g., from content script)
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-
   if (changes.botEnabled !== undefined) {
     botEnabled = changes.botEnabled.newValue ?? false;
     console.log(`[Background] Bot enabled changed: ${botEnabled}`);
   }
 });
 
-// --- ALARM SETUP ---
-// Periodic scan every 5 minutes when bot is enabled
 const SCAN_ALARM_NAME = "linkedin-scan";
 const SCAN_INTERVAL_MINUTES = 5;
 
-chrome.alarms.create(SCAN_ALARM_NAME, { periodInMinutes: SCAN_INTERVAL_MINUTES });
+// Guard against duplicate alarms on worker restarts
+chrome.alarms.get(SCAN_ALARM_NAME, (existing) => {
+  if (!existing) {
+    chrome.alarms.create(SCAN_ALARM_NAME, { periodInMinutes: SCAN_INTERVAL_MINUTES });
+  }
+});
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === SCAN_ALARM_NAME && botEnabled) {
@@ -50,7 +34,6 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-// --- SCAN LOGIC ---
 async function triggerScanOnLinkedInTabs() {
   try {
     const tabs = await chrome.tabs.query({ url: "https://www.linkedin.com/messaging/*" });
@@ -63,7 +46,6 @@ async function triggerScanOnLinkedInTabs() {
     for (const tab of tabs) {
       if (tab.id !== undefined) {
         chrome.tabs.sendMessage(tab.id, { type: "CHECK_UNREAD" }).catch((err) => {
-          // Tab might not have content script loaded
           console.log(`[Background] Could not message tab ${tab.id}:`, err.message);
         });
       }
@@ -75,10 +57,9 @@ async function triggerScanOnLinkedInTabs() {
   }
 }
 
-// --- MESSAGE HANDLING ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender, sendResponse);
-  return true; // Keep channel open for async response
+  return true;
 });
 
 async function handleMessage(
@@ -117,7 +98,6 @@ async function handleMessage(
       break;
 
     case "GET_SETTINGS":
-      // Provide settings to any requester (useful for debugging)
       try {
         const settings = await getBotSettings();
         sendResponse({ status: "ok", settings });
@@ -126,17 +106,57 @@ async function handleMessage(
       }
       break;
 
+    case "TEST_API_KEY":
+      await handleTestApiKey(
+        { provider: message.provider, key: message.key },
+        sendResponse
+      );
+      break;
+
     default:
       console.log(`[Background] Unknown message type: ${type}`);
       sendResponse({ status: "unknown" });
   }
 }
 
-// --- EXTENSION LIFECYCLE ---
+// API key testing (bypasses CORS for options page)
+async function handleTestApiKey(
+  message: { provider: string; key: string },
+  sendResponse: (response: any) => void
+) {
+  const { provider, key } = message;
+
+  if (!key?.trim()) {
+    sendResponse({ success: false, message: "Key is empty" });
+    return;
+  }
+
+  const endpoints: Record<string, string> = {
+    openai: "https://api.openai.com/v1/models",
+    groq: "https://api.groq.com/openai/v1/models",
+  };
+
+  const url = endpoints[provider];
+  if (!url) {
+    sendResponse({ success: false, message: "Unknown provider" });
+    return;
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+
+    const msg = `${response.status} ${response.statusText}${response.status === 429 ? " (rate limited)" : ""}`;
+    sendResponse({ success: response.ok, message: msg });
+  } catch (err: any) {
+    sendResponse({ success: false, message: err?.message || "Request failed" });
+  }
+}
+
 chrome.runtime.onInstalled.addListener((details) => {
   console.log(`[Background] Extension installed/updated: ${details.reason}`);
-
-  // Ensure alarm exists after install/update
   chrome.alarms.get(SCAN_ALARM_NAME, (alarm) => {
     if (!alarm) {
       chrome.alarms.create(SCAN_ALARM_NAME, { periodInMinutes: SCAN_INTERVAL_MINUTES });
@@ -144,8 +164,3 @@ chrome.runtime.onInstalled.addListener((details) => {
     }
   });
 });
-
-// Optional: Handle extension icon click (if not using popup)
-// chrome.action.onClicked.addListener((tab) => {
-//   chrome.tabs.create({ url: "popup.html" });
-// });

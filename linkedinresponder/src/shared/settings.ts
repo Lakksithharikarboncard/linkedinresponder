@@ -2,14 +2,15 @@
 // Centralized schema + defaults for chrome.storage.local settings.
 // Goal: one source of truth for keys/defaults, no logic change.
 
+export type AIProvider = "openai" | "groq";
+
 export type BotSettings = {
   openaiApiKey: string;
   groqApiKey: string;
-  resendApiKey: string;
+  webhookUrl: string; // Zapier webhook URL
 
   replyPrompt: string;
   leadPrompt: string;
-  targetEmail: string;
 
   chatMinDelay: number; // ms
   chatMaxDelay: number; // ms
@@ -19,16 +20,20 @@ export type BotSettings = {
   // Working hours window (used by content script strictHours toggle)
   startHour: number; // 0-23
   endHour: number; // 0-23
+
+  // Per-function AI provider selection
+  replyProvider: AIProvider; // Reply generation
+  decisionProvider: AIProvider; // Should-reply decision
+  leadDetectionProvider: AIProvider; // Lead qualification
 };
 
 export const SETTINGS_KEYS = {
   openaiApiKey: "openaiApiKey",
   groqApiKey: "groqApiKey",
-  resendApiKey: "resendApiKey",
+  webhookUrl: "webhookUrl",
 
   replyPrompt: "replyPrompt",
   leadPrompt: "leadPrompt",
-  targetEmail: "targetEmail",
 
   chatMinDelay: "chatMinDelay",
   chatMaxDelay: "chatMaxDelay",
@@ -37,17 +42,20 @@ export const SETTINGS_KEYS = {
 
   startHour: "startHour",
   endHour: "endHour",
+
+  replyProvider: "replyProvider",
+  decisionProvider: "decisionProvider",
+  leadDetectionProvider: "leadDetectionProvider",
 } as const;
 
 export const DEFAULT_SETTINGS: BotSettings = {
   openaiApiKey: "",
   groqApiKey: "",
-  resendApiKey: "",
+  webhookUrl: "",
 
   replyPrompt:
     "You are {user_name}'s assistant. Reply to this lead based on context:\n{extracted_text}\nReply briefly and professionally.",
   leadPrompt: "Does this conversation indicate strong buying intent or interest? Reply YES or NO.",
-  targetEmail: "",
 
   chatMinDelay: 2000,
   chatMaxDelay: 5000,
@@ -56,7 +64,13 @@ export const DEFAULT_SETTINGS: BotSettings = {
 
   startHour: 9,
   endHour: 18,
+
+  replyProvider: "groq",
+  decisionProvider: "groq",
+  leadDetectionProvider: "openai",
 };
+
+const VALID_PROVIDERS: AIProvider[] = ["openai", "groq"];
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {
   const n = typeof value === "number" ? value : Number(value);
@@ -76,12 +90,19 @@ function asString(value: unknown, fallback: string): string {
   return value;
 }
 
-function normalizeEmail(value: string): string {
-  return value.trim();
+function asProvider(value: unknown, fallback: AIProvider): AIProvider {
+  if (typeof value === "string" && VALID_PROVIDERS.includes(value as AIProvider)) {
+    return value as AIProvider;
+  }
+  return fallback;
 }
 
 function normalizePrompt(value: string): string {
   return value;
+}
+
+function normalizeUrl(value: string): string {
+  return value.trim();
 }
 
 export async function getBotSettings(): Promise<BotSettings> {
@@ -104,11 +125,10 @@ export async function getBotSettings(): Promise<BotSettings> {
       const settings: BotSettings = {
         openaiApiKey: asString(raw[SETTINGS_KEYS.openaiApiKey], DEFAULT_SETTINGS.openaiApiKey).trim(),
         groqApiKey: asString(raw[SETTINGS_KEYS.groqApiKey], DEFAULT_SETTINGS.groqApiKey).trim(),
-        resendApiKey: asString(raw[SETTINGS_KEYS.resendApiKey], DEFAULT_SETTINGS.resendApiKey).trim(),
+        webhookUrl: normalizeUrl(asString(raw[SETTINGS_KEYS.webhookUrl], DEFAULT_SETTINGS.webhookUrl)),
 
         replyPrompt: normalizePrompt(asString(raw[SETTINGS_KEYS.replyPrompt], DEFAULT_SETTINGS.replyPrompt)),
         leadPrompt: normalizePrompt(asString(raw[SETTINGS_KEYS.leadPrompt], DEFAULT_SETTINGS.leadPrompt)),
-        targetEmail: normalizeEmail(asString(raw[SETTINGS_KEYS.targetEmail], DEFAULT_SETTINGS.targetEmail)),
 
         chatMinDelay: safeChatMin,
         chatMaxDelay: safeChatMax,
@@ -117,6 +137,10 @@ export async function getBotSettings(): Promise<BotSettings> {
 
         startHour,
         endHour,
+
+        replyProvider: asProvider(raw[SETTINGS_KEYS.replyProvider], DEFAULT_SETTINGS.replyProvider),
+        decisionProvider: asProvider(raw[SETTINGS_KEYS.decisionProvider], DEFAULT_SETTINGS.decisionProvider),
+        leadDetectionProvider: asProvider(raw[SETTINGS_KEYS.leadDetectionProvider], DEFAULT_SETTINGS.leadDetectionProvider),
       };
 
       resolve(settings);
@@ -129,11 +153,10 @@ export async function setBotSettings(partial: Partial<BotSettings>): Promise<voi
 
   if (partial.openaiApiKey !== undefined) patch[SETTINGS_KEYS.openaiApiKey] = String(partial.openaiApiKey);
   if (partial.groqApiKey !== undefined) patch[SETTINGS_KEYS.groqApiKey] = String(partial.groqApiKey);
-  if (partial.resendApiKey !== undefined) patch[SETTINGS_KEYS.resendApiKey] = String(partial.resendApiKey);
+  if (partial.webhookUrl !== undefined) patch[SETTINGS_KEYS.webhookUrl] = String(partial.webhookUrl);
 
   if (partial.replyPrompt !== undefined) patch[SETTINGS_KEYS.replyPrompt] = String(partial.replyPrompt);
   if (partial.leadPrompt !== undefined) patch[SETTINGS_KEYS.leadPrompt] = String(partial.leadPrompt);
-  if (partial.targetEmail !== undefined) patch[SETTINGS_KEYS.targetEmail] = String(partial.targetEmail);
 
   if (partial.chatMinDelay !== undefined) patch[SETTINGS_KEYS.chatMinDelay] = partial.chatMinDelay;
   if (partial.chatMaxDelay !== undefined) patch[SETTINGS_KEYS.chatMaxDelay] = partial.chatMaxDelay;
@@ -142,6 +165,10 @@ export async function setBotSettings(partial: Partial<BotSettings>): Promise<voi
 
   if (partial.startHour !== undefined) patch[SETTINGS_KEYS.startHour] = partial.startHour;
   if (partial.endHour !== undefined) patch[SETTINGS_KEYS.endHour] = partial.endHour;
+
+  if (partial.replyProvider !== undefined) patch[SETTINGS_KEYS.replyProvider] = partial.replyProvider;
+  if (partial.decisionProvider !== undefined) patch[SETTINGS_KEYS.decisionProvider] = partial.decisionProvider;
+  if (partial.leadDetectionProvider !== undefined) patch[SETTINGS_KEYS.leadDetectionProvider] = partial.leadDetectionProvider;
 
   return new Promise((resolve) => {
     chrome.storage.local.set(patch, () => resolve());

@@ -5,120 +5,88 @@ export interface DoubleTextPattern {
   pattern: string;
 }
 
-export function shouldDoubleText(reply: string, conversationContext: any): boolean {
-  if (conversationContext.messageCount < 2) return false;
-  
-  const randomChance = Math.random() < 0.2;
-  const isComplex = reply.split(' ').length > 30;
-  const theyAskedMultiple = conversationContext.lastMessageQuestions > 1;
-  
-  return randomChance || isComplex || theyAskedMultiple;
+type Context = { messageCount: number; lastMessageQuestions: number };
+
+export function shouldDoubleText(reply: string, ctx: Context): boolean {
+  const isLong = reply.split(" ").length > 40;
+  const theyAskedQuestions = ctx.lastMessageQuestions > 0;
+  return isLong || theyAskedQuestions;
 }
 
-export function generateDoubleText(originalReply: string, conversationContext: any): DoubleTextPattern | null {
-  const patterns = [
-    tryPriceBreakdown,
-    tryAfterThought,
-    tryQuestionRefinement,
-    tryEmojiFollowup
-  ];
-  
+export function generateDoubleText(originalReply: string, ctx: Context): DoubleTextPattern | null {
+  const patterns = [tryPriceBreakdown, tryAfterThought, tryQuestionRefinement, tryEmojiFollowup];
   for (const pattern of patterns) {
-    const result = pattern(originalReply, conversationContext);
+    const result = pattern(originalReply);
     if (result) return result;
   }
-  
   return null;
 }
 
-function tryPriceBreakdown(reply: string, context: any): DoubleTextPattern | null {
-  const sentences = reply.split(/[.!?]/).filter(s => s.trim());
-  if (sentences.length < 2) return null;
-  
+function tryPriceBreakdown(reply: string): DoubleTextPattern | null {
+  const sentences = reply.split(/[.!?]/).filter((s) => s.trim());
+  if (sentences.length < 3) return null;
   const splitPoint = Math.floor(sentences.length / 2);
-  const first = sentences.slice(0, splitPoint).join('. ').trim();
-  const second = sentences.slice(splitPoint).join('. ').trim();
-  
-  if (first.length < 10 || second.length < 5) return null;
-  
+  const first = sentences.slice(0, splitPoint).join(". ").trim();
+  const second = sentences.slice(splitPoint).join(". ").trim();
+  if (first.length < 20 || second.length < 10) return null;
   return {
     firstMessage: first,
     secondMessage: second,
     delayMs: 3000 + Math.random() * 4000,
-    pattern: 'price_breakdown'
+    pattern: "price_breakdown",
   };
 }
 
-function tryAfterThought(reply: string, context: any): DoubleTextPattern | null {
-  const words = reply.split(' ');
-  if (words.length < 20) return null;
-  
-  const sentences = reply.split(/[.!?]/).filter(s => s.trim());
+function tryAfterThought(reply: string): DoubleTextPattern | null {
+  const sentences = reply.split(/[.!?]/).filter((s) => s.trim());
   if (sentences.length < 2) return null;
-  
   const first = sentences[0].trim();
-  const rest = sentences.slice(1).join('. ').trim();
-  
-  const afterthoughtPrefixes = ['Actually, ', 'Oh and ', 'Also - '];
-  const prefix = afterthoughtPrefixes[Math.floor(Math.random() * afterthoughtPrefixes.length)];
-  
+  const rest = sentences.slice(1).join(". ").trim();
+  const prefixes = ["Quick note:", "Also,", "One more thing:"];
+  const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
   return {
     firstMessage: first,
-    secondMessage: prefix + rest.charAt(0).toLowerCase() + rest.slice(1),
-    delayMs: 5000 + Math.random() * 5000,
-    pattern: 'afterthought'
+    secondMessage: `${prefix} ${rest.charAt(0).toLowerCase()}${rest.slice(1)}`,
+    delayMs: 5000 + Math.random() * 3000,
+    pattern: "afterthought",
   };
 }
 
-function tryQuestionRefinement(reply: string, context: any): DoubleTextPattern | null {
-  if (!reply.includes('?')) return null;
-  
-  const refinements = ['Just ballpark', 'No pressure', 'Roughly'];
-  
-  if (Math.random() < 0.3 && reply.trim().endsWith('?')) {
-    return {
-      firstMessage: reply.trim(),
-      secondMessage: refinements[Math.floor(Math.random() * refinements.length)],
-      delayMs: 2000 + Math.random() * 2000,
-      pattern: 'question_refinement'
-    };
-  }
-  
-  return null;
+function tryQuestionRefinement(reply: string): DoubleTextPattern | null {
+  if (!reply.includes("?")) return null;
+  if (!reply.trim().endsWith("?")) return null;
+  const refinements = ["No rush—ballpark is fine.", "Roughly is okay.", "Just an estimate works."];
+  return {
+    firstMessage: reply.trim(),
+    secondMessage: refinements[Math.floor(Math.random() * refinements.length)],
+    delayMs: 1800 + Math.random() * 1200,
+    pattern: "question_refinement",
+  };
 }
 
-function tryEmojiFollowup(reply: string, context: any): DoubleTextPattern | null {
-  if (reply.split(' ').length > 15) return null;
-  
+function tryEmojiFollowup(reply: string): DoubleTextPattern | null {
+  if (reply.split(" ").length > 15) return null;
+  if (/[.!?]$/.test(reply.trim())) return null; // don’t add emoji if already punctuated
   const affirmatives = [/^(yeah|yes|yep|sure|sounds good|makes sense|got it|perfect)/i];
-  const isAffirmative = affirmatives.some(pattern => pattern.test(reply));
-  
+  const isAffirmative = affirmatives.some((p) => p.test(reply));
   if (!isAffirmative) return null;
-  
-  const emojis = ['👍', '👌', '✅'];
-  
-  if (Math.random() < 0.4) {
-    return {
-      firstMessage: reply.trim(),
-      secondMessage: emojis[Math.floor(Math.random() * emojis.length)],
-      delayMs: 1500 + Math.random() * 2000,
-      pattern: 'emoji_followup'
-    };
-  }
-  
-  return null;
+  const emojis = ["👍", "👌", "✅"];
+  return {
+    firstMessage: reply.trim(),
+    secondMessage: emojis[Math.floor(Math.random() * emojis.length)],
+    delayMs: 1500 + Math.random() * 1500,
+    pattern: "emoji_followup",
+  };
 }
 
 export function calculateDoubleTextDelay(pattern: string): number {
-  const baseDelays: Record<string, number> = {
+  const base: Record<string, number> = {
     price_breakdown: 3000,
-    afterthought: 6000,
+    afterthought: 5000,
     question_refinement: 1800,
-    emoji_followup: 1500
+    emoji_followup: 1500,
   };
-  
-  const base = baseDelays[pattern] || 3000;
-  const variance = base * 0.4;
-  
-  return base + (Math.random() - 0.5) * 2 * variance;
+  const v = base[pattern] ?? 3000;
+  const variance = v * 0.4;
+  return v + (Math.random() - 0.5) * 2 * variance;
 }
