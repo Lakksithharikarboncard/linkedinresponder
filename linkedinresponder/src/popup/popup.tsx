@@ -35,10 +35,6 @@ const Popup = () => {
   const [storageStats, setStorageStats] = useState({ conversationCount: 0, totalMessages: 0 });
 
   const [nChats, setNChats] = useState(10);
-  const [model, setModel] = useState("gpt-4o-mini");
-  const [useGroq, setUseGroq] = useState(false);
-  const [groqModel, setGroqModel] = useState("llama-3.3-70b-versatile");
-  const [strictHours, setStrictHours] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [replyPreviewEnabled, setReplyPreviewEnabled] = useState(false);
@@ -88,16 +84,9 @@ const Popup = () => {
   };
 
   useEffect(() => {
-    chrome.storage.local.get(
-      ["savedUseGroq", "savedGroqModel", "savedStrictHours", "savedModel", "replyPreviewEnabled"],
-      (data) => {
-        if (data.savedUseGroq !== undefined) setUseGroq(data.savedUseGroq);
-        if (data.savedGroqModel) setGroqModel(data.savedGroqModel);
-        if (data.savedStrictHours !== undefined) setStrictHours(data.savedStrictHours);
-        if (data.savedModel) setModel(data.savedModel);
-        if (data.replyPreviewEnabled !== undefined) setReplyPreviewEnabled(data.replyPreviewEnabled);
-      }
-    );
+    chrome.storage.local.get(["replyPreviewEnabled"], (data) => {
+      if (data.replyPreviewEnabled !== undefined) setReplyPreviewEnabled(data.replyPreviewEnabled);
+    });
 
     const onStorageChanged: Parameters<typeof chrome.storage.onChanged.addListener>[0] = (changes, areaName) => {
       if (areaName !== "local") return;
@@ -208,26 +197,6 @@ const Popup = () => {
     });
   }, [logs]);
 
-  const handleUseGroqChange = (value: boolean) => {
-    setUseGroq(value);
-    chrome.storage.local.set({ savedUseGroq: value });
-  };
-
-  const handleGroqModelChange = (value: string) => {
-    setGroqModel(value);
-    chrome.storage.local.set({ savedGroqModel: value });
-  };
-
-  const handleStrictHoursChange = (value: boolean) => {
-    setStrictHours(value);
-    chrome.storage.local.set({ savedStrictHours: value });
-  };
-
-  const handleModelChange = (value: string) => {
-    setModel(value);
-    chrome.storage.local.set({ savedModel: value });
-  };
-
   const handleReplyPreviewChange = (value: boolean) => {
     setReplyPreviewEnabled(value);
     chrome.storage.local.set({ replyPreviewEnabled: value });
@@ -238,7 +207,7 @@ const Popup = () => {
     try {
       const res = await sendToContent({
         type: "START_BOT",
-        config: { nChats, model, useGroq, groqModel, strictHours, replyPreviewEnabled },
+        config: { nChats, replyPreviewEnabled },
       });
       if (res && res.status === "ok") {
         setRunning(true);
@@ -279,7 +248,7 @@ const Popup = () => {
       skipped: stats.chatsProcessed - stats.repliesSent,
       leads: stats.leadsFound,
       tokens: stats.tokensUsed,
-      model: stats.currentModel || (useGroq ? groqModel : model),
+      model: stats.currentModel || "Unknown",
     });
 
     setRunning(false);
@@ -368,17 +337,6 @@ const Popup = () => {
     const ss = String(secs % 60).padStart(2, "0");
     return `${mm}:${ss}`;
   }, [stats.startTime, tick]);
-
-  const getTokenLimit = () => {
-    if (!useGroq) return 0;
-    if (groqModel === "openai/gpt-oss-120b") return 200000;
-    if (groqModel.includes("kimi")) return 300000;
-    if (groqModel.includes("scout") || groqModel.includes("maverick") || groqModel.includes("qwen")) return 500000;
-    return 100000;
-  };
-
-  const tokenLimit = getTokenLimit();
-  const tokenPercent = tokenLimit > 0 ? Math.min(100, Math.round((stats.tokensUsed / tokenLimit) * 100)) : 0;
 
   if (loading) {
     return (
@@ -628,24 +586,9 @@ const Popup = () => {
             <span><strong>{storageStats.totalMessages}</strong> msgs</span>
           </div>
 
-          {useGroq && tokenLimit > 0 && (
-            <div style={{ background: "#f8f9fa", padding: "6px", borderRadius: "4px", marginTop: "6px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "2px" }}>
-                <span style={{ fontSize: "7px", color: "#6c757d", textTransform: "uppercase" }}>Tokens</span>
-                <span style={{ fontSize: "7px", fontWeight: "600", color: "#173a35" }}>
-                  {stats.tokensUsed.toLocaleString()} / {tokenLimit.toLocaleString()}
-                </span>
-              </div>
-              <div style={{ width: "100%", height: "3px", background: "#dee2e6", borderRadius: "2px", overflow: "hidden" }}>
-                <div
-                  style={{
-                    width: `${tokenPercent}%`,
-                    height: "100%",
-                    background: tokenPercent > 80 ? "#c7522a" : tokenPercent > 50 ? "#e5c185" : "#74a892",
-                    transition: "width 0.3s ease",
-                  }}
-                />
-              </div>
+          {stats.currentModel && (
+            <div style={{ textAlign: "center", marginTop: "6px", fontSize: "8px", color: "#6c757d" }}>
+              Model: <strong>{stats.currentModel}</strong>
             </div>
           )}
         </div>
@@ -678,75 +621,15 @@ const Popup = () => {
               />
             </div>
 
-            <div>
-              <label style={{ fontSize: "8px", color: "#6c757d", display: "block", marginBottom: "2px" }}>
-                {useGroq ? "Groq Model" : "OpenAI Model"}
-              </label>
-              {useGroq ? (
-                <select
-                  value={groqModel}
-                  onChange={(e) => handleGroqModelChange(e.target.value)}
-                  disabled={running}
-                  style={{
-                    width: "100%",
-                    padding: "5px",
-                    border: "1px solid #dee2e6",
-                    borderRadius: "4px",
-                    fontSize: "9px",
-                    background: "white",
-                  }}
-                >
-                  <option value="openai/gpt-oss-120b">GPT-OSS 120B</option>
-                  <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
-                  <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout</option>
-                  <option value="meta-llama/llama-4-maverick-17b-128e-instruct">Llama 4 Maverick</option>
-                  <option value="moonshotai/kimi-k2-instruct-0905">Kimi K2</option>
-                  <option value="qwen/qwen3-32b">Qwen 3 32B</option>
-                </select>
-              ) : (
-                <select
-                  value={model}
-                  onChange={(e) => handleModelChange(e.target.value)}
-                  disabled={running}
-                  style={{
-                    width: "100%",
-                    padding: "5px",
-                    border: "1px solid #dee2e6",
-                    borderRadius: "4px",
-                    fontSize: "10px",
-                    background: "white",
-                  }}
-                >
-                  <option value="gpt-4o-mini">GPT-4o mini</option>
-                  <option value="gpt-4o">GPT-4o</option>
-                </select>
-              )}
+            <div style={{ display: "flex", alignItems: "flex-end" }}>
+              <ToggleRow
+                label="Preview"
+                sublabel={replyPreviewEnabled ? "On" : "Off"}
+                enabled={replyPreviewEnabled}
+                disabled={running}
+                onToggle={() => !running && handleReplyPreviewChange(!replyPreviewEnabled)}
+              />
             </div>
-          </div>
-
-          {/* TOGGLES */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "4px", marginBottom: "6px" }}>
-            <ToggleRow
-              label="Groq"
-              sublabel={useGroq ? "Fast" : "OpenAI"}
-              enabled={useGroq}
-              disabled={running}
-              onToggle={() => !running && handleUseGroqChange(!useGroq)}
-            />
-            <ToggleRow
-              label="Hours"
-              sublabel={strictHours ? "9-6" : "24/7"}
-              enabled={strictHours}
-              disabled={running}
-              onToggle={() => !running && handleStrictHoursChange(!strictHours)}
-            />
-            <ToggleRow
-              label="Preview"
-              sublabel={replyPreviewEnabled ? "On" : "Off"}
-              enabled={replyPreviewEnabled}
-              disabled={running}
-              onToggle={() => !running && handleReplyPreviewChange(!replyPreviewEnabled)}
-            />
           </div>
 
           {/* ACTION BUTTONS */}
@@ -765,7 +648,7 @@ const Popup = () => {
                 cursor: "pointer",
               }}
             >
-              Settings
+              ⚙️ Settings
             </button>
 
             {!running ? (
@@ -972,7 +855,7 @@ const Popup = () => {
           </div>
         </div>
 
-        <div style={{ textAlign: "center", fontSize: "7px", color: "#6c757d" }}>v2.6.0 • LinkedIn Autoresponder</div>
+        <div style={{ textAlign: "center", fontSize: "7px", color: "#6c757d" }}>v2.7.0 • LinkedIn Autoresponder</div>
       </div>
     </div>
   );
@@ -1051,6 +934,7 @@ function ToggleRow(props: {
         justifyContent: "space-between",
         cursor: props.disabled ? "not-allowed" : "pointer",
         opacity: props.disabled ? 0.6 : 1,
+        flex: 1,
       }}
     >
       <div>
