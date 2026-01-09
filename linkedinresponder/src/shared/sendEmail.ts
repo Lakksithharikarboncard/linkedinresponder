@@ -24,12 +24,15 @@ const DISENGAGEMENT_PATTERNS = [
 
 const SHORT_ACK_PATTERNS = ["sure", "ok", "okay", "k", "thx", "thanks"];
 
+// UPDATED: Added Routeway support
 async function getModelForProvider(provider: AIProvider): Promise<string> {
     const settings = await getBotSettings();
-    return provider === "groq" ? settings.groqModel : settings.openaiModel;
+    if (provider === "groq") return settings.groqModel;
+    if (provider === "routeway") return settings.routewayModel;
+    return settings.openaiModel;
 }
 
-// Unified helper to make AI calls - handles Groq (Chat Completions) and OpenAI (Responses API)
+// UPDATED: Added Routeway support - Unified helper to make AI calls
 async function makeAICall(
     apiKey: string,
     prompt: string,
@@ -53,6 +56,25 @@ async function makeAICall(
 
         if (!response.ok) {
             throw new Error(`Groq API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.choices?.[0]?.message?.content?.trim() || "";
+    } else if (provider === "routeway") {
+        // NEW: Routeway - Use Chat Completions API (OpenAI-compatible)
+        const response = await fetch("https://api.routeway.ai/v1/chat/completions", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+                model,
+                messages: [{ role: "user", content: prompt }],
+                max_tokens: maxTokens,
+                temperature: 0.2,
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Routeway API error: ${response.status}`);
         }
 
         const data = await response.json();
@@ -92,97 +114,6 @@ async function makeAICall(
         }
 
         return "";
-    }
-}
-
-// Should reply to conversation
-export async function shouldReplyToConversation(
-    apiKey: string,
-    conversation: Array<{ speaker: string; message: string }>,
-    leadName: string,
-    provider: AIProvider = "openai"
-): Promise<{ shouldReply: boolean; reason: string }> {
-    if (conversation.length === 0) {
-        return { shouldReply: false, reason: "Empty conversation" };
-    }
-
-    const lastMessage = conversation[conversation.length - 1];
-    const lastMsgLower = lastMessage.message.toLowerCase().trim();
-
-    const theirMessages = conversation.filter((m) => m.speaker !== leadName);
-    const myMessages = conversation.filter((m) => m.speaker === leadName);
-
-    // Quick disengagement check
-    if (DISENGAGEMENT_PATTERNS.some((p) => lastMsgLower.includes(p))) {
-        return { shouldReply: false, reason: "Lead disengaged" };
-    }
-
-    // Short ack after close check
-    if (SHORT_ACK_PATTERNS.includes(lastMsgLower) && theirMessages.length > 0) {
-        const lastTheirMsg = theirMessages[theirMessages.length - 1].message.toLowerCase();
-        if (
-            lastTheirMsg.includes("no overlap") ||
-            lastTheirMsg.includes("reach out if") ||
-            lastTheirMsg.includes("feel free to reach out") ||
-            lastTheirMsg.includes("not a fit") ||
-            lastTheirMsg.includes("no problem") ||
-            lastTheirMsg.includes("thanks for letting me know")
-        ) {
-            return { shouldReply: false, reason: "Ack after close" };
-        }
-    }
-
-    // Quick positive checks
-    const iAskedQuestion = theirMessages.length > 0 && theirMessages[theirMessages.length - 1].message.includes("?");
-    const theyResponded = myMessages[myMessages.length - 1] === lastMessage;
-    const theirLastIdx = theirMessages.length ? conversation.findIndex((m) => m === theirMessages[theirMessages.length - 1]) : -1;
-    const lastIdx = conversation.length - 1;
-
-    if (iAskedQuestion && theyResponded && lastIdx > theirLastIdx) {
-        return { shouldReply: true, reason: "They answered my question" };
-    }
-
-    const isShortResponse = lastMessage.message.split(" ").length < 20;
-    const hasEngagement = theirMessages.length > 0 && myMessages.length > 0;
-    if (isShortResponse && hasEngagement && theirMessages.length >= 2) {
-        return { shouldReply: true, reason: "Short but engaged response" };
-    }
-
-    const positiveSignals = [
-        "yes", "yeah", "sure", "absolutely", "definitely", "interested",
-        "sounds good", "tell me more", "how does", "what about", "can you",
-        "could you", "would love to", "want to know", "curious about", "?"
-    ];
-    if (positiveSignals.some((s) => lastMsgLower.includes(s))) {
-        return { shouldReply: true, reason: "Positive engagement detected" };
-    }
-
-    // AI fallback for uncertain cases
-    const prompt = `You are analyzing a LinkedIn conversation to decide if a response is needed.
-
-CONVERSATION (last 20 messages):
-${conversation.slice(-20).map((m) => `${m.speaker}: ${m.message}`).join("\n")}
-
-CONTEXT: The lead just sent: "${lastMessage.message}"
-
-Rules:
-- REPLY if they asked a question, answered my question, or showed interest.
-- SKIP if they rejected, said no, not interested, policy/no allowance, or gave a short acknowledgment after my closing message.
-- Be biased to REPLY only when there's real engagement; otherwise SKIP.
-
-Respond ONLY with:
-REPLY: [one sentence reason]
-OR
-SKIP: [one sentence reason]`;
-
-    try {
-        const content = await makeAICall(apiKey, prompt, provider, 60);
-        const shouldReply = content.toUpperCase().startsWith("REPLY");
-        const reason = content.split(":")[1]?.trim() || "AI decision";
-        return { shouldReply, reason };
-    } catch (e) {
-        console.error("❌ AI decision check failed:", e);
-        return { shouldReply: true, reason: "AI error - defaulting to engage" };
     }
 }
 

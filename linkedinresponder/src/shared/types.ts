@@ -1,23 +1,7 @@
 // linkedinresponder/src/shared/types.ts
 //
-// NOTE: BotConfig is used for RUNTIME state passed via messages.
-// For STORAGE schema, see BotSettings in settings.ts.
-// These are intentionally separate to allow flexibility.
-
-export interface BotConfig {
-  openaiApiKey: string;
-  groqApiKey: string;
-  resendApiKey: string;
-  model: string;
-  groqModel: string;
-  useGroq: boolean;
-  systemPrompt: string;
-  minDelay: number;
-  maxDelay: number;
-  typingSpeed: number;
-  strictWorkingHours: boolean;
-  leadNotificationEmail: string;
-}
+// Core types for bot runtime state and data structures.
+// For storage schema, see BotSettings in settings.ts.
 
 export interface BotStats {
   chatsProcessed: number;
@@ -42,18 +26,30 @@ export interface BotLogEntry {
   type: 'INFO' | 'ACTION' | 'SUCCESS' | 'ERROR' | 'WARNING' | 'LEAD';
 }
 
+
 export interface BotCommand {
-  type: 'GET_STATUS' | 'START_BOT' | 'STOP_BOT';
+  type: 
+    | 'GET_STATUS' 
+    | 'START_BOT' 
+    | 'STOP_BOT'
+    | 'PAUSE_BOT'      // ✅ Added
+    | 'RESUME_BOT'     // ✅ Added
+    | 'APPROVE_REPLY'  // ✅ Added
+    | 'REJECT_REPLY'   // ✅ Added
+    | 'CHECKUNREAD'    // ✅ Added
+    | 'PINGTEST';      // ✅ Added
   config?: {
     nChats: number;
-    model: string;
-    useGroq: boolean;
-    groqModel: string;
-    strictHours: boolean;
+    replyPreviewEnabled: boolean;
+    blacklist: string[];
   };
+  // For APPROVE_REPLY/REJECT_REPLY
+  reply?: string;
+  leadName?: string;
 }
 
-// ✅ Profile information structure
+
+// Profile information structure
 export interface LeadProfile {
   headline: string;
   jobTitle: string;
@@ -63,7 +59,7 @@ export interface LeadProfile {
   lastScraped: number;
 }
 
-// ✅ Message entry structure
+// Message entry structure
 export interface MessageEntry {
   speaker: string;
   content: string;
@@ -71,7 +67,7 @@ export interface MessageEntry {
   type: 'sent' | 'received';
 }
 
-// ✅ Conversation history structure
+// Conversation history structure
 export interface ConversationHistory {
   leadId: string;
   leadName: string;

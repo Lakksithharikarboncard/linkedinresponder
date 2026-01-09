@@ -2,11 +2,13 @@
 // Centralized schema + defaults for chrome.storage.local settings.
 // Goal: one source of truth for keys/defaults, no logic change.
 
-export type AIProvider = "openai" | "groq";
+export type AIProvider = "openai" | "groq" | "routeway";
 
 export type BotSettings = {
     openaiApiKey: string;
     groqApiKey: string;
+    groqApiKey2: string; // NEW: Second Groq key for rotation
+    routewayApiKey: string; // NEW: Routeway API key
     webhookUrl: string; // Zapier webhook URL
 
     replyPrompt: string;
@@ -22,18 +24,20 @@ export type BotSettings = {
     endHour: number; // 0-23
 
     // Per-function AI provider selection
-    replyProvider: AIProvider; // Reply generation
-    decisionProvider: AIProvider; // Should-reply decision
-    leadDetectionProvider: AIProvider; // Lead qualification
+    replyProvider: AIProvider; // Reply generation + decision (combined)
+    leadDetectionProvider: AIProvider; // Lead qualification (separate)
 
     // Model selection
     groqModel: string;
     openaiModel: string;
+    routewayModel: string; // NEW: Routeway model selection
 };
 
 export const SETTINGS_KEYS = {
     openaiApiKey: "openaiApiKey",
     groqApiKey: "groqApiKey",
+    groqApiKey2: "groqApiKey2", // NEW
+    routewayApiKey: "routewayApiKey", // NEW
     webhookUrl: "webhookUrl",
 
     replyPrompt: "replyPrompt",
@@ -48,16 +52,18 @@ export const SETTINGS_KEYS = {
     endHour: "endHour",
 
     replyProvider: "replyProvider",
-    decisionProvider: "decisionProvider",
     leadDetectionProvider: "leadDetectionProvider",
 
     groqModel: "groqModel",
     openaiModel: "openaiModel",
+    routewayModel: "routewayModel", // NEW
 } as const;
 
 export const DEFAULT_SETTINGS: BotSettings = {
     openaiApiKey: "",
     groqApiKey: "",
+    groqApiKey2: "", // NEW
+    routewayApiKey: "", // NEW
     webhookUrl: "",
 
     replyPrompt:
@@ -72,15 +78,15 @@ export const DEFAULT_SETTINGS: BotSettings = {
     startHour: 9,
     endHour: 18,
 
-    replyProvider: "groq",
-    decisionProvider: "groq",
-    leadDetectionProvider: "openai",
+    replyProvider: "routeway", // Default to free Routeway models
+    leadDetectionProvider: "routeway",
 
     groqModel: "openai/gpt-oss-120b",
-    openaiModel: "gpt-5-mini",
+    openaiModel: "gpt-5.1", // NEW: Updated to GPT-5.1
+    routewayModel: "devstral-2512:free", // NEW: Default free model
 };
 
-const VALID_PROVIDERS: AIProvider[] = ["openai", "groq"];
+const VALID_PROVIDERS: AIProvider[] = ["openai", "groq", "routeway"]; // NEW: Added routeway
 
 const VALID_GROQ_MODELS = [
     "openai/gpt-oss-20b",
@@ -90,11 +96,21 @@ const VALID_GROQ_MODELS = [
     "moonshotai/kimi-k2-instruct-0905",
 ];
 
+// UPDATED: New GPT-5.1 series models
 const VALID_OPENAI_MODELS = [
+    "gpt-5.1",
+    "gpt-5",
     "gpt-5-mini",
     "gpt-5-nano",
-    "gpt-4.1-nano",
-    "gpt-4.1-mini",
+    "gpt-5.1-chat-latest",
+];
+
+// NEW: Routeway free models
+const VALID_ROUTEWAY_MODELS = [
+    "devstral-2512:free",
+    "kimi-k2-0905:free",
+    "minimax-m2:free",
+    "deepseek-r1t2-chimera:free",
 ];
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {
@@ -136,6 +152,14 @@ function asOpenaiModel(value: unknown, fallback: string): string {
     return fallback;
 }
 
+// NEW: Routeway model validation
+function asRoutewayModel(value: unknown, fallback: string): string {
+    if (typeof value === "string" && VALID_ROUTEWAY_MODELS.includes(value)) {
+        return value;
+    }
+    return fallback;
+}
+
 function normalizePrompt(value: string): string {
     return value;
 }
@@ -164,6 +188,8 @@ export async function getBotSettings(): Promise<BotSettings> {
             const settings: BotSettings = {
                 openaiApiKey: asString(raw[SETTINGS_KEYS.openaiApiKey], DEFAULT_SETTINGS.openaiApiKey).trim(),
                 groqApiKey: asString(raw[SETTINGS_KEYS.groqApiKey], DEFAULT_SETTINGS.groqApiKey).trim(),
+                groqApiKey2: asString(raw[SETTINGS_KEYS.groqApiKey2], DEFAULT_SETTINGS.groqApiKey2).trim(), // NEW
+                routewayApiKey: asString(raw[SETTINGS_KEYS.routewayApiKey], DEFAULT_SETTINGS.routewayApiKey).trim(), // NEW
                 webhookUrl: normalizeUrl(asString(raw[SETTINGS_KEYS.webhookUrl], DEFAULT_SETTINGS.webhookUrl)),
 
                 replyPrompt: normalizePrompt(asString(raw[SETTINGS_KEYS.replyPrompt], DEFAULT_SETTINGS.replyPrompt)),
@@ -178,11 +204,11 @@ export async function getBotSettings(): Promise<BotSettings> {
                 endHour,
 
                 replyProvider: asProvider(raw[SETTINGS_KEYS.replyProvider], DEFAULT_SETTINGS.replyProvider),
-                decisionProvider: asProvider(raw[SETTINGS_KEYS.decisionProvider], DEFAULT_SETTINGS.decisionProvider),
                 leadDetectionProvider: asProvider(raw[SETTINGS_KEYS.leadDetectionProvider], DEFAULT_SETTINGS.leadDetectionProvider),
 
                 groqModel: asGroqModel(raw[SETTINGS_KEYS.groqModel], DEFAULT_SETTINGS.groqModel),
                 openaiModel: asOpenaiModel(raw[SETTINGS_KEYS.openaiModel], DEFAULT_SETTINGS.openaiModel),
+                routewayModel: asRoutewayModel(raw[SETTINGS_KEYS.routewayModel], DEFAULT_SETTINGS.routewayModel), // NEW
             };
 
             resolve(settings);
@@ -195,6 +221,8 @@ export async function setBotSettings(partial: Partial<BotSettings>): Promise<voi
 
     if (partial.openaiApiKey !== undefined) patch[SETTINGS_KEYS.openaiApiKey] = String(partial.openaiApiKey);
     if (partial.groqApiKey !== undefined) patch[SETTINGS_KEYS.groqApiKey] = String(partial.groqApiKey);
+    if (partial.groqApiKey2 !== undefined) patch[SETTINGS_KEYS.groqApiKey2] = String(partial.groqApiKey2); // NEW
+    if (partial.routewayApiKey !== undefined) patch[SETTINGS_KEYS.routewayApiKey] = String(partial.routewayApiKey); // NEW
     if (partial.webhookUrl !== undefined) patch[SETTINGS_KEYS.webhookUrl] = String(partial.webhookUrl);
 
     if (partial.replyPrompt !== undefined) patch[SETTINGS_KEYS.replyPrompt] = String(partial.replyPrompt);
@@ -209,11 +237,11 @@ export async function setBotSettings(partial: Partial<BotSettings>): Promise<voi
     if (partial.endHour !== undefined) patch[SETTINGS_KEYS.endHour] = partial.endHour;
 
     if (partial.replyProvider !== undefined) patch[SETTINGS_KEYS.replyProvider] = partial.replyProvider;
-    if (partial.decisionProvider !== undefined) patch[SETTINGS_KEYS.decisionProvider] = partial.decisionProvider;
     if (partial.leadDetectionProvider !== undefined) patch[SETTINGS_KEYS.leadDetectionProvider] = partial.leadDetectionProvider;
 
     if (partial.groqModel !== undefined) patch[SETTINGS_KEYS.groqModel] = partial.groqModel;
     if (partial.openaiModel !== undefined) patch[SETTINGS_KEYS.openaiModel] = partial.openaiModel;
+    if (partial.routewayModel !== undefined) patch[SETTINGS_KEYS.routewayModel] = partial.routewayModel; // NEW
 
     return new Promise((resolve) => {
         chrome.storage.local.set(patch, () => resolve());

@@ -340,91 +340,29 @@ const Popup = () => {
 
   if (loading) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>
-        <div style={{ fontSize: "14px", color: "#173a35" }}>Loading...</div>
+      <div className="loading-screen">
+        <div className="loading-spinner"></div>
+        <div className="loading-text">Loading...</div>
       </div>
     );
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "linear-gradient(135deg, #fbf2c4, #e5c185)" }}>
+    <div className="popup-root">
       
       {/* REPLY PREVIEW MODAL */}
       {pendingReply && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.6)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 9999,
-          }}
-        >
-          <div
-            style={{
-              background: "white",
-              borderRadius: "12px",
-              padding: "16px",
-              maxWidth: "380px",
-              width: "95%",
-              boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
-            }}
-          >
-            <h2 style={{ fontSize: "14px", fontWeight: "600", color: "#173a35", marginBottom: "8px" }}>
-              📝 Review Reply to {pendingReply.leadName}
-            </h2>
+        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && handleRejectReply()}>
+          <div className="modal-content">
+            <h2 className="modal-title">📝 Review Reply to {pendingReply.leadName}</h2>
             <textarea
+              className="modal-textarea"
               value={editedReply}
               onChange={(e) => setEditedReply(e.target.value)}
-              style={{
-                width: "100%",
-                minHeight: "100px",
-                padding: "10px",
-                border: "1px solid #dee2e6",
-                borderRadius: "6px",
-                fontSize: "12px",
-                fontFamily: "inherit",
-                resize: "vertical",
-              }}
             />
-            <div style={{ display: "flex", gap: "8px", marginTop: "12px" }}>
-              <button
-                onClick={handleRejectReply}
-                style={{
-                  flex: 1,
-                  padding: "10px",
-                  background: "#f8f9fa",
-                  border: "1px solid #dee2e6",
-                  borderRadius: "6px",
-                  fontSize: "12px",
-                  fontWeight: "500",
-                  color: "#c7522a",
-                  cursor: "pointer",
-                }}
-              >
-                ✕ Skip
-              </button>
-              <button
-                onClick={handleApproveReply}
-                style={{
-                  flex: 1,
-                  padding: "10px",
-                  background: "#008585",
-                  border: "none",
-                  borderRadius: "6px",
-                  fontSize: "12px",
-                  fontWeight: "500",
-                  color: "white",
-                  cursor: "pointer",
-                }}
-              >
-                ✓ Send
-              </button>
+            <div className="modal-actions">
+              <button className="btn-secondary" onClick={handleRejectReply}>✕ Skip</button>
+              <button className="btn-primary" onClick={handleApproveReply}>✓ Send</button>
             </div>
           </div>
         </div>
@@ -432,37 +370,10 @@ const Popup = () => {
 
       {/* SESSION SUMMARY MODAL */}
       {showSummary && sessionSummary && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 9999,
-          }}
-          onClick={() => setShowSummary(false)}
-        >
-          <div
-            style={{
-              background: "white",
-              borderRadius: "12px",
-              padding: "20px",
-              maxWidth: "320px",
-              width: "90%",
-              boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 style={{ fontSize: "16px", fontWeight: "600", color: "#173a35", marginBottom: "16px", textAlign: "center" }}>
-              ✅ Session Complete
-            </h2>
-
-            <div style={{ display: "grid", gap: "10px" }}>
+        <div className="modal-overlay" onClick={() => setShowSummary(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h2 className="modal-title">✅ Session Complete</h2>
+            <div className="summary-grid">
               <SummaryRow label="Duration" value={sessionSummary.duration} valueColor="#173a35" />
               <SummaryRow label="Processed" value={sessionSummary.processed} valueColor="#008585" />
               <SummaryRow label="Replied" value={sessionSummary.replied} valueColor="#74a892" />
@@ -471,138 +382,75 @@ const Popup = () => {
               <SummaryRow label="Tokens Used" value={sessionSummary.tokens.toLocaleString()} valueColor="#173a35" />
               <SummaryRow label="Model" value={sessionSummary.model} valueColor="#173a35" small />
             </div>
-
-            <button
-              onClick={() => setShowSummary(false)}
-              style={{
-                width: "100%",
-                marginTop: "16px",
-                padding: "10px",
-                background: "#008585",
-                color: "white",
-                border: "none",
-                borderRadius: "6px",
-                fontSize: "12px",
-                fontWeight: "500",
-                cursor: "pointer",
-              }}
-            >
-              Close
-            </button>
+            <button className="btn-primary" onClick={() => setShowSummary(false)}>Close</button>
           </div>
         </div>
       )}
 
       {/* HEADER */}
-      <div
-        style={{
-          background: "linear-gradient(135deg, #c7522a, #008585)",
-          color: "white",
-          padding: "12px 14px",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <div
-              style={{
-                width: "32px",
-                height: "32px",
-                background: "rgba(255,255,255,0.2)",
-                borderRadius: "8px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                border: "1px solid rgba(255,255,255,0.3)",
-              }}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="white" strokeWidth="2" />
-              </svg>
+      <div className="header">
+        <div className="header-content">
+          <div className="header-left">
+            <div className="header-icon">
+              <IconMessage size={18} color="white" />
             </div>
             <div>
-              <div style={{ fontSize: "14px", fontWeight: "600" }}>LinkedIn Autoresponder</div>
-              <div style={{ fontSize: "9px", opacity: 0.9 }}>Human-like AI agent</div>
+              <div className="header-title">LinkedIn Autoresponder</div>
+              <div className="header-subtitle">Human-like AI agent</div>
             </div>
           </div>
 
-          <div style={{ textAlign: "right" }}>
-            <div
-              style={{
-                padding: "2px 8px",
-                borderRadius: "20px",
-                fontSize: "9px",
-                fontWeight: "500",
-                background: running ? (paused ? "#e5c185" : "#74a892") : "rgba(255,255,255,0.2)",
-                border: "1px solid rgba(255,255,255,0.3)",
-              }}
-            >
+          <div className="header-right">
+            <div className={`status-badge ${running ? (paused ? "paused" : "running") : "idle"}`}>
               {running ? (paused ? "❚❚ Paused" : "● Running") : "○ Idle"}
             </div>
-            <div style={{ fontSize: "9px", marginTop: "2px", opacity: 0.8 }}>⏱ {uptime}</div>
+            <div className="header-uptime">⏱ {uptime}</div>
           </div>
         </div>
 
         {errorMsg && (
-          <div
-            style={{
-              marginTop: "8px",
-              padding: "5px 8px",
-              background: "#fbf2c4",
-              color: "#c7522a",
-              borderRadius: "6px",
-              fontSize: "9px",
-              border: "1px solid #e5c185",
-            }}
-          >
+          <div className="error-banner">
             ⚠️ {errorMsg}
           </div>
         )}
       </div>
 
       {/* CONTENT */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "8px", display: "flex", flexDirection: "column", gap: "6px" }}>
+      <div className="content">
         
-        {/* STATS */}
-        <div style={{ background: "white", borderRadius: "8px", padding: "8px", border: "1px solid #e5e5e5" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "4px", marginBottom: "6px" }}>
-            <IconChart size={16} color="#000" />
-            <span style={{ fontSize: "10px", fontWeight: "600", color: "#173a35" }}>Stats</span>
-            <span style={{ fontSize: "7px", color: "#74a892" }}>● Live</span>
+        {/* STATS CARD */}
+        <div className="card">
+          <div className="card-header">
+            <IconChart size={16} color="#173a35" />
+            <span className="card-title">Stats</span>
+            <span className="live-indicator">● Live</span>
           </div>
 
-          <div style={{ 
-            fontSize: "9px", 
-            color: "#173a35", 
-            display: "flex", 
-            flexWrap: "wrap", 
-            justifyContent: "center",
-            alignItems: "center",
-            gap: "10px"
-          }}>
-            <span><strong style={{ color: "#008585" }}>{stats.chatsProcessed}</strong> processed</span>
-            <span><strong style={{ color: "#74a892" }}>{stats.repliesSent}</strong> replied</span>
-            <span><strong style={{ color: "#c7522a" }}>{stats.leadsFound}</strong> leads</span>
-            <span><strong>{storageStats.conversationCount}</strong> convos</span>
-            <span><strong>{storageStats.totalMessages}</strong> msgs</span>
+          <div className="stats-grid">
+            <StatItem label="processed" value={stats.chatsProcessed} color="#008585" />
+            <StatItem label="replied" value={stats.repliesSent} color="#74a892" />
+            <StatItem label="leads" value={stats.leadsFound} color="#c7522a" />
+            <StatItem label="convos" value={storageStats.conversationCount} color="#173a35" />
+            <StatItem label="msgs" value={storageStats.totalMessages} color="#173a35" />
           </div>
 
           {stats.currentModel && (
-            <div style={{ textAlign: "center", marginTop: "6px", fontSize: "8px", color: "#6c757d" }}>
+            <div className="model-info">
               Model: <strong>{stats.currentModel}</strong>
             </div>
           )}
         </div>
 
-        {/* CONTROLS */}
-        <div style={{ background: "white", borderRadius: "8px", padding: "8px", border: "1px solid #e5e5e5" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "4px", marginBottom: "6px" }}>
-            <IconControls size={16} color="#000" />
-            <span style={{ fontSize: "10px", fontWeight: "600", color: "#173a35" }}>Controls</span>
+        {/* CONTROLS CARD */}
+        <div className="card">
+          <div className="card-header">
+            <IconControls size={16} color="#173a35" />
+            <span className="card-title">Controls</span>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "6px" }}>
-            <div>
-              <label style={{ fontSize: "8px", color: "#6c757d", display: "block", marginBottom: "2px" }}>Target chats</label>
+          <div className="controls-grid">
+            <div className="field-group">
+              <label className="field-label">Target chats</label>
               <input
                 type="number"
                 min={1}
@@ -610,21 +458,13 @@ const Popup = () => {
                 value={nChats}
                 onChange={(e) => setNChats(Number(e.target.value))}
                 disabled={running}
-                style={{
-                  width: "100%",
-                  padding: "5px",
-                  border: "1px solid #dee2e6",
-                  borderRadius: "4px",
-                  fontSize: "10px",
-                  fontFamily: "monospace",
-                }}
+                className="number-input"
               />
             </div>
 
-            <div style={{ display: "flex", alignItems: "flex-end" }}>
-              <ToggleRow
-                label="Preview"
-                sublabel={replyPreviewEnabled ? "On" : "Off"}
+            <div className="field-group">
+              <label className="field-label">Reply preview</label>
+              <ToggleSwitch
                 enabled={replyPreviewEnabled}
                 disabled={running}
                 onToggle={() => !running && handleReplyPreviewChange(!replyPreviewEnabled)}
@@ -633,74 +473,28 @@ const Popup = () => {
           </div>
 
           {/* ACTION BUTTONS */}
-          <div style={{ display: "flex", gap: "4px" }}>
-            <button
-              onClick={openOptionsPage}
-              style={{
-                flex: 1,
-                padding: "7px",
-                background: "#e5c185",
-                border: "none",
-                borderRadius: "5px",
-                fontSize: "10px",
-                fontWeight: "500",
-                color: "#173a35",
-                cursor: "pointer",
-              }}
-            >
+          <div className="button-row">
+            <button className="btn-secondary" onClick={openOptionsPage}>
               ⚙️ Settings
             </button>
 
             {!running ? (
               <button
+                className="btn-primary btn-start"
                 onClick={handleStart}
                 disabled={!!errorMsg}
-                style={{
-                  flex: 2,
-                  padding: "7px",
-                  background: errorMsg ? "#dee2e6" : "#008585",
-                  border: "none",
-                  borderRadius: "5px",
-                  fontSize: "10px",
-                  fontWeight: "500",
-                  color: "white",
-                  cursor: errorMsg ? "not-allowed" : "pointer",
-                }}
               >
                 ▶ Start
               </button>
             ) : (
               <>
                 <button
+                  className={`btn-secondary ${paused ? "btn-resume" : ""}`}
                   onClick={paused ? handleResume : handlePause}
-                  style={{
-                    flex: 1,
-                    padding: "7px",
-                    background: paused ? "#74a892" : "#e5c185",
-                    border: "none",
-                    borderRadius: "5px",
-                    fontSize: "10px",
-                    fontWeight: "500",
-                    color: paused ? "white" : "#173a35",
-                    cursor: "pointer",
-                  }}
                 >
                   {paused ? "▶" : "❚❚"}
                 </button>
-                <button
-                  onClick={handleStop}
-                  style={{
-                    flex: 1,
-                    padding: "7px",
-                    background: "#c7522a",
-                    border: "none",
-                    borderRadius: "5px",
-                    fontSize: "10px",
-                    fontWeight: "500",
-                    color: "white",
-                    cursor: "pointer",
-                  }}
-                >
+                <button className="btn-stop" onClick={handleStop}>
                   ■ Stop
                 </button>
               </>
@@ -708,141 +502,62 @@ const Popup = () => {
           </div>
 
           {/* UTILITY BUTTONS */}
-          <div style={{ display: "flex", gap: "4px", marginTop: "4px" }}>
+          <div className="button-row utility-row">
             <button
+              className="btn-utility"
               onClick={handleExportConversations}
               disabled={running || storageStats.conversationCount === 0}
-              style={{
-                flex: 1,
-                padding: "5px",
-                background: "#f8f9fa",
-                border: "1px solid #dee2e6",
-                borderRadius: "4px",
-                fontSize: "8px",
-                color: running || storageStats.conversationCount === 0 ? "#adb5bd" : "#000",
-                cursor: running || storageStats.conversationCount === 0 ? "not-allowed" : "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "4px",
-              }}
             >
-              <IconExport size={14} color={running || storageStats.conversationCount === 0 ? "#adb5bd" : "#000"} />
+              <IconExport size={14} color="currentColor" />
               Export
             </button>
             <button
+              className="btn-utility"
               onClick={handleClearStorage}
               disabled={running || storageStats.conversationCount === 0}
-              style={{
-                flex: 1,
-                padding: "5px",
-                background: "#f8f9fa",
-                border: "1px solid #dee2e6",
-                borderRadius: "4px",
-                fontSize: "8px",
-                color: running || storageStats.conversationCount === 0 ? "#adb5bd" : "#000",
-                cursor: running || storageStats.conversationCount === 0 ? "not-allowed" : "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "4px",
-              }}
             >
-              <IconDelete size={14} color={running || storageStats.conversationCount === 0 ? "#adb5bd" : "#000"} />
+              <IconDelete size={14} color="currentColor" />
               Clear ({storageStats.conversationCount})
             </button>
           </div>
         </div>
 
         {/* TERMINAL */}
-        <div
-          className="terminal-wrapper"
-          style={{
-            background: "#1a1f1e",
-            borderRadius: "8px",
-            overflow: "hidden",
-            border: "1px solid #2a2f2e",
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-            minHeight: "160px",
-          }}
-        >
-          <div
-            style={{
-              padding: "6px 10px",
-              borderBottom: "1px solid rgba(255,255,255,0.1)",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+        <div className="terminal">
+          <div className="terminal-header">
+            <div className="terminal-title">
               <IconTerminal size={14} color="#74a892" />
-              <span style={{ fontSize: "9px", color: "#74a892", fontWeight: "600" }}>Live Terminal</span>
+              <span>Live Terminal</span>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <div className="terminal-actions">
               <button
+                className="terminal-btn"
                 onClick={handleCopyLogs}
                 disabled={logs.length === 0}
-                style={{
-                  padding: "3px 6px",
-                  background: copied ? "#74a892" : "rgba(255,255,255,0.1)",
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  borderRadius: "3px",
-                  fontSize: "8px",
-                  color: "#fbf2c4",
-                  cursor: logs.length === 0 ? "not-allowed" : "pointer",
-                  opacity: logs.length === 0 ? 0.5 : 1,
-                }}
               >
                 {copied ? "✓" : "Copy"}
               </button>
-              <span style={{ fontSize: "7px", color: "#6c757d" }}>{logs.length}</span>
+              <span className="log-count">{logs.length}</span>
             </div>
           </div>
 
-          <div
-            ref={logContainerRef}
-            className="log-container"
-            style={{
-              flex: 1,
-              overflowY: "auto",
-              padding: "8px",
-              fontFamily: "monospace",
-              fontSize: "9px",
-              lineHeight: "1.4",
-              color: "#fbf2c4",
-            }}
-          >
-            {logs.length === 0 && <div style={{ opacity: 0.5, fontStyle: "italic" }}>Ready.</div>}
+          <div ref={logContainerRef} className="log-container">
+            {logs.length === 0 && <div className="log-empty">Ready.</div>}
             {logs.map((log, i) => {
               const isDoubleText = log.message.includes("Double-texting") || log.message.includes("double-text");
               const isProfileLog = log.message.includes("(") && log.message.includes("@");
               const isStorageLog = log.message.includes("Saved") && log.message.includes("messages");
 
               return (
-                <div key={i} style={{ display: "flex", gap: "6px", marginBottom: "2px" }}>
-                  <span style={{ opacity: 0.5, minWidth: "55px", fontSize: "8px" }}>
+                <div key={i} className="log-entry">
+                  <span className="log-time">
                     {new Date(log.time).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                   </span>
-                  <span
-                    style={{
-                      opacity: 0.7,
-                      minWidth: "35px",
-                      fontSize: "8px",
-                      color: log.actor === "Bot" ? "#74a892" : log.actor === "User" ? "#e5c185" : "#fbf2c4",
-                    }}
-                  >
+                  <span className={`log-actor actor-${log.actor.toLowerCase()}`}>
                     {log.actor}
                   </span>
                   <span
-                    style={{
-                      opacity: log.type === "ERROR" ? 1 : 0.85,
-                      color: log.type === "ERROR" ? "#c7522a" : isDoubleText ? "#e5c185" : "inherit",
-                      fontWeight: isDoubleText || isStorageLog ? "600" : "normal",
-                      fontSize: "8px",
-                    }}
+                    className={`log-message ${log.type === "ERROR" ? "error" : ""} ${isDoubleText ? "double-text" : ""} ${isStorageLog ? "storage" : ""}`}
                   >
                     {isDoubleText && "💬 "}
                     {isProfileLog && "👤 "}
@@ -855,13 +570,21 @@ const Popup = () => {
           </div>
         </div>
 
-        <div style={{ textAlign: "center", fontSize: "7px", color: "#6c757d" }}>v2.7.0 • LinkedIn Autoresponder</div>
+        <div className="footer-version">v2.8.0 • LinkedIn Autoresponder</div>
       </div>
     </div>
   );
 };
 
 // --- ICON COMPONENTS ---
+
+function IconMessage({ size = 16, color = "#000" }: { size?: number; color?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke={color} strokeWidth="2" fill="none"/>
+    </svg>
+  );
+}
 
 function IconChart({ size = 16, color = "#000" }: { size?: number; color?: string }) {
   return (
@@ -900,7 +623,7 @@ function IconTerminal({ size = 16, color = "#000" }: { size?: number; color?: st
 function IconExport({ size = 14, color = "#000" }: { size?: number; color?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
-    <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2v9.67z"/>
+      <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2v9.67z"/>
     </svg>
   );
 }
@@ -915,65 +638,34 @@ function IconDelete({ size = 14, color = "#000" }: { size?: number; color?: stri
 
 // --- HELPER COMPONENTS ---
 
-function ToggleRow(props: {
-  label: string;
-  sublabel: string;
-  enabled: boolean;
-  disabled: boolean;
-  onToggle: () => void;
-}) {
+function StatItem({ label, value, color }: { label: string; value: number; color: string }) {
   return (
-    <div
-      onClick={props.onToggle}
-      style={{
-        background: "#f8f9fa",
-        padding: "5px 6px",
-        borderRadius: "4px",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        cursor: props.disabled ? "not-allowed" : "pointer",
-        opacity: props.disabled ? 0.6 : 1,
-        flex: 1,
-      }}
-    >
-      <div>
-        <div style={{ fontSize: "8px", fontWeight: "500", color: "#173a35" }}>{props.label}</div>
-        <div style={{ fontSize: "6px", color: "#6c757d" }}>{props.sublabel}</div>
-      </div>
-      <div
-        style={{
-          width: "24px",
-          height: "12px",
-          background: props.enabled ? "#008585" : "#dee2e6",
-          borderRadius: "6px",
-          position: "relative",
-          transition: "background 0.2s",
-        }}
-      >
-        <div
-          style={{
-            width: "8px",
-            height: "8px",
-            background: "white",
-            borderRadius: "50%",
-            position: "absolute",
-            top: "2px",
-            left: props.enabled ? "14px" : "2px",
-            transition: "left 0.2s",
-            boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-          }}
-        />
-      </div>
+    <div className="stat-item">
+      <div className="stat-value" style={{ color }}>{value}</div>
+      <div className="stat-label">{label}</div>
     </div>
   );
 }
 
-function SummaryRow(props: { label: string; value: string | number; valueColor: string; small?: boolean }) {
+function ToggleSwitch({ enabled, disabled, onToggle }: { enabled: boolean; disabled: boolean; onToggle: () => void }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", padding: "8px", background: "#f8f9fa", borderRadius: "6px" }}>
-      <span style={{ fontSize: "11px", color: "#6c757d" }}>{props.label}:</span>
-      <span style={{ fontSize: props.small ? "10px" : "11px", fontWeight: "600", color: props.valueColor }}>{props.value}</span>
+    <div
+      className={`toggle-switch ${enabled ? "enabled" : ""} ${disabled ? "disabled" : ""}`}
+      onClick={onToggle}
+    >
+      <div className="toggle-track">
+        <div className="toggle-thumb"></div>
+      </div>
+      <span className="toggle-label">{enabled ? "On" : "Off"}</span>
+    </div>
+  );
+}
+
+function SummaryRow({ label, value, valueColor, small }: { label: string; value: string | number; valueColor: string; small?: boolean }) {
+  return (
+    <div className="summary-row">
+      <span className="summary-label">{label}:</span>
+      <span className={`summary-value ${small ? "small" : ""}`} style={{ color: valueColor }}>{value}</span>
     </div>
   );
 }

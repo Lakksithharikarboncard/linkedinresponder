@@ -1,3 +1,5 @@
+// linkedinresponder/src/background/background.ts
+
 import { getBotSettings } from "../shared/settings";
 
 let botEnabled = false;
@@ -134,6 +136,8 @@ async function handleTestApiKey(
   const endpoints: Record<string, string> = {
     openai: "https://api.openai.com/v1/models",
     groq: "https://api.groq.com/openai/v1/models",
+    groq2: "https://api.groq.com/openai/v1/models", // NEW: Second Groq key uses same endpoint
+    routeway: "https://api.routeway.ai/v1/models", // NEW: Routeway endpoint
   };
 
   const url = endpoints[provider];

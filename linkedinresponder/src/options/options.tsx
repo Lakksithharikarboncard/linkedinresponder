@@ -7,8 +7,8 @@ import { DEFAULT_SETTINGS, getBotSettings, setBotSettings, BotSettings, AIProvid
 type SaveState = "idle" | "saving" | "saved" | "error";
 type ApiTestStatus = "idle" | "testing" | "success" | "error";
 
-interface ApiKeyStatus { openai: ApiTestStatus; groq: ApiTestStatus; }
-interface ApiKeyMessage { openai: string; groq: string; }
+interface ApiKeyStatus { openai: ApiTestStatus; groq: ApiTestStatus; routeway: ApiTestStatus; }
+interface ApiKeyMessage { openai: string; groq: string; routeway: string; }
 
 // Model options
 const GROQ_MODELS = [
@@ -20,10 +20,18 @@ const GROQ_MODELS = [
 ];
 
 const OPENAI_MODELS = [
+    { id: "gpt-5.1", name: "GPT-5.1" },          // NEW
+    { id: "gpt-5", name: "GPT-5" },              // NEW
     { id: "gpt-5-mini", name: "GPT-5 mini" },
     { id: "gpt-5-nano", name: "GPT-5 nano" },
-    { id: "gpt-4.1-nano", name: "GPT-4.1 nano" },
-    { id: "gpt-4.1-mini", name: "GPT-4.1 mini" },
+    { id: "gpt-5.1-chat-latest", name: "GPT-5.1 Chat" }, // NEW
+];
+
+const ROUTEWAY_MODELS = [
+    { id: "devstral-2512:free", name: "Devstral 2512" },
+    { id: "kimi-k2-0905:free", name: "Kimi K2" },
+    { id: "minimax-m2:free", name: "Minimax M2" },
+    { id: "deepseek-r1t2-chimera:free", name: "DeepSeek R1T2" },
 ];
 
 const Options = () => {
@@ -34,8 +42,8 @@ const Options = () => {
     const [darkMode, setDarkMode] = useState(false);
     const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
-    const [apiStatus, setApiStatus] = useState<ApiKeyStatus>({ openai: "idle", groq: "idle" });
-    const [apiMessage, setApiMessage] = useState<ApiKeyMessage>({ openai: "", groq: "" });
+    const [apiStatus, setApiStatus] = useState<ApiKeyStatus>({ openai: "idle", groq: "idle", routeway: "idle" });
+    const [apiMessage, setApiMessage] = useState<ApiKeyMessage>({ openai: "", groq: "", routeway: "" });
 
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -80,9 +88,9 @@ const Options = () => {
             setError("OpenAI API key is required");
             return;
         }
-        if (!settings.groqApiKey.trim()) {
+        if (!settings.groqApiKey.trim() && !settings.groqApiKey2.trim()) {
             setSaveState("error");
-            setError("Groq API key is required");
+            setError("At least one Groq API key is required");
             return;
         }
 
@@ -125,7 +133,7 @@ const Options = () => {
     };
 
     const handleExport = () => {
-        const data = { settings, exportedAt: new Date().toISOString(), version: "2.7.0" };
+        const data = { settings, exportedAt: new Date().toISOString(), version: "2.8.0" };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -135,10 +143,11 @@ const Options = () => {
         URL.revokeObjectURL(url);
     };
 
-    const testApiKey = async (type: "openai" | "groq") => {
+    const testApiKey = async (type: "openai" | "groq" | "routeway") => {
         const keyMap = {
             openai: settings.openaiApiKey,
             groq: settings.groqApiKey,
+            routeway: settings.routewayApiKey,
         };
 
         const key = keyMap[type];
@@ -183,10 +192,9 @@ const Options = () => {
             ? `${formatHour(settings.startHour)} – ${formatHour(settings.endHour)}`
             : "Invalid";
 
-    // Helper to set all providers at once
+    // Helper to set both providers at once
     const setAllProviders = (provider: AIProvider) => {
         updateSetting("replyProvider", provider);
-        updateSetting("decisionProvider", provider);
         updateSetting("leadDetectionProvider", provider);
     };
 
@@ -197,7 +205,7 @@ const Options = () => {
                     <div className="header-icon">⚙️</div>
                     <div>
                         <h1>Settings</h1>
-                        <p>LinkedIn Autoresponder v2.7.0</p>
+                        <p>LinkedIn Autoresponder v2.8.0</p>
                     </div>
                 </div>
                 <div className="header-actions">
@@ -216,7 +224,7 @@ const Options = () => {
                 {/* API Keys */}
                 <section className="card wide">
                     <div className="card-header">API Keys</div>
-                    <div className="card-body two-col">
+                    <div className="card-body three-col">
                         <ApiKeyField
                             label="OpenAI API Key"
                             value={settings.openaiApiKey}
@@ -227,7 +235,7 @@ const Options = () => {
                             onTest={() => testApiKey("openai")}
                         />
                         <ApiKeyField
-                            label="Groq API Key"
+                            label="Groq API Key #1"
                             value={settings.groqApiKey}
                             onChange={(v) => updateSetting("groqApiKey", v)}
                             placeholder="gsk_..."
@@ -235,28 +243,45 @@ const Options = () => {
                             message={apiMessage.groq}
                             onTest={() => testApiKey("groq")}
                         />
+                        <ApiKeyField
+                            label="Groq API Key #2 (Optional)"
+                            value={settings.groqApiKey2}
+                            onChange={(v) => updateSetting("groqApiKey2", v)}
+                            placeholder="gsk_..."
+                            status="idle"
+                            message="Rotates with Key #1 to avoid rate limits"
+                            onTest={() => {}}
+                            optional
+                        />
+                        <ApiKeyField
+                            label="Routeway API Key (Optional)"
+                            value={settings.routewayApiKey}
+                            onChange={(v) => updateSetting("routewayApiKey", v)}
+                            placeholder="rw_..."
+                            status={apiStatus.routeway}
+                            message={apiMessage.routeway}
+                            onTest={() => testApiKey("routeway")}
+                            optional
+                        />
                     </div>
+                    <p className="muted" style={{ marginTop: "4px" }}>
+                        💡 <strong>Tip:</strong> Add a second Groq key to double your rate limits. Keys rotate automatically.
+                    </p>
                 </section>
 
                 {/* AI Provider Selection */}
                 <section className="card wide">
                     <div className="card-header">AI Provider Selection</div>
-                    <div className="card-body three-col">
+                    <div className="card-body two-col">
                         <ProviderSelect
-                            label="Reply Generation"
-                            description="Generates chat responses"
+                            label="Reply Generation & Decision"
+                            description="Decides if bot should reply and generates responses"
                             value={settings.replyProvider}
                             onChange={(v) => updateSetting("replyProvider", v)}
                         />
                         <ProviderSelect
-                            label="Reply Decision"
-                            description="Decides if bot should reply"
-                            value={settings.decisionProvider}
-                            onChange={(v) => updateSetting("decisionProvider", v)}
-                        />
-                        <ProviderSelect
                             label="Lead Detection"
-                            description="Identifies qualified leads"
+                            description="Identifies qualified leads from conversations"
                             value={settings.leadDetectionProvider}
                             onChange={(v) => updateSetting("leadDetectionProvider", v)}
                         />
@@ -264,21 +289,21 @@ const Options = () => {
                     <div className="quick-row">
                         <button onClick={() => setAllProviders("groq")}>All Groq</button>
                         <button onClick={() => setAllProviders("openai")}>All OpenAI</button>
+                        <button onClick={() => setAllProviders("routeway")}>All Routeway</button>
                         <button onClick={() => {
                             updateSetting("replyProvider", "groq");
-                            updateSetting("decisionProvider", "groq");
                             updateSetting("leadDetectionProvider", "openai");
                         }}>Recommended</button>
                     </div>
                     <p className="muted" style={{ marginTop: "8px" }}>
-                        💡 <strong>Recommended:</strong> Groq for replies & decisions (fast, cheap), OpenAI for lead detection (accurate).
+                        💡 <strong>Recommended:</strong> Groq for replies (fast, free), OpenAI for lead detection (accurate).
                     </p>
                 </section>
 
                 {/* Model Selection */}
                 <section className="card wide">
                     <div className="card-header">Model Selection</div>
-                    <div className="card-body two-col">
+                    <div className="card-body three-col">
                         <div className="field-block">
                             <label className="field-label">Groq Model</label>
                             <select
@@ -289,7 +314,7 @@ const Options = () => {
                                     <option key={m.id} value={m.id}>{m.name}</option>
                                 ))}
                             </select>
-                            <span className="muted">Used when provider is set to Groq</span>
+                            <span className="muted">Used when provider is Groq</span>
                         </div>
                         <div className="field-block">
                             <label className="field-label">OpenAI Model</label>
@@ -301,17 +326,41 @@ const Options = () => {
                                     <option key={m.id} value={m.id}>{m.name}</option>
                                 ))}
                             </select>
-                            <span className="muted">Used when provider is set to OpenAI</span>
+                            <span className="muted">Used when provider is OpenAI</span>
+                        </div>
+                        <div className="field-block">
+                            <label className="field-label">Routeway Model</label>
+                            <select
+                                value={settings.routewayModel}
+                                onChange={(e) => updateSetting("routewayModel", e.target.value)}
+                            >
+                                {ROUTEWAY_MODELS.map((m) => (
+                                    <option key={m.id} value={m.id}>{m.name}</option>
+                                ))}
+                            </select>
+                            <span className="muted">Used when provider is Routeway</span>
                         </div>
                     </div>
                     <div className="quick-row">
-                        <button onClick={() => { updateSetting("groqModel", "llama-3.3-70b-versatile"); updateSetting("openaiModel", "gpt-5-mini"); }}>
+                        <button onClick={() => { 
+                            updateSetting("groqModel", "llama-3.3-70b-versatile"); 
+                            updateSetting("openaiModel", "gpt-5.1");
+                            updateSetting("routewayModel", "minimax-m2:free");
+                        }}>
                             Balanced
                         </button>
-                        <button onClick={() => { updateSetting("groqModel", "llama-3.1-8b-instant"); updateSetting("openaiModel", "gpt-5-nano"); }}>
+                        <button onClick={() => { 
+                            updateSetting("groqModel", "llama-3.1-8b-instant"); 
+                            updateSetting("openaiModel", "gpt-5-nano");
+                            updateSetting("routewayModel", "devstral-2512:free");
+                        }}>
                             Fast & Cheap
                         </button>
-                        <button onClick={() => { updateSetting("groqModel", "openai/gpt-oss-120b"); updateSetting("openaiModel", "gpt-5-mini"); }}>
+                        <button onClick={() => { 
+                            updateSetting("groqModel", "openai/gpt-oss-120b"); 
+                            updateSetting("openaiModel", "gpt-5-mini");
+                            updateSetting("routewayModel", "deepseek-r1t2-chimera:free");
+                        }}>
                             High Quality
                         </button>
                     </div>
@@ -322,7 +371,7 @@ const Options = () => {
                     <div className="card-header">Lead Notifications</div>
                     <div className="card-body">
                         <div className="field-block">
-                            <label className="field-label">Zapier Webhook URL</label>
+                            <label className="field-label">Zapier Webhook URL (Optional)</label>
                             <input
                                 type="url"
                                 value={settings.webhookUrl}
@@ -342,7 +391,7 @@ const Options = () => {
   "headline": "VP of Sales at Acme Corp",
   "conversationHistory": "...",
   "messageCount": 12,
-  "detectedAt": "2026-01-04T19:30:00Z"
+  "detectedAt": "2026-01-08T19:30:00Z"
 }`}</pre>
                             </div>
                         )}
@@ -441,16 +490,40 @@ const Options = () => {
     );
 };
 
-function ApiKeyField(props: { label: string; value: string; onChange: (v: string) => void; placeholder: string; status: ApiTestStatus; message: string; onTest: () => void }) {
+function ApiKeyField(props: { 
+    label: string; 
+    value: string; 
+    onChange: (v: string) => void; 
+    placeholder: string; 
+    status: ApiTestStatus; 
+    message: string; 
+    onTest: () => void;
+    optional?: boolean;
+}) {
     return (
         <div className="field-block">
             <label className="field-label">{props.label}</label>
             <div className="row">
-                <input type="password" value={props.value} onChange={(e) => props.onChange(e.target.value)} placeholder={props.placeholder} style={{ flex: 1 }} />
-                <button className="btn ghost" onClick={props.onTest} disabled={!props.value || props.status === "testing"} style={{ whiteSpace: "nowrap" }}>
-                    {props.status === "testing" ? "..." : "Test"}
-                </button>
-                <StatusDot status={props.status} />
+                <input 
+                    type="password" 
+                    value={props.value} 
+                    onChange={(e) => props.onChange(e.target.value)} 
+                    placeholder={props.placeholder} 
+                    style={{ flex: 1 }} 
+                />
+                {!props.optional && (
+                    <>
+                        <button 
+                            className="btn ghost" 
+                            onClick={props.onTest} 
+                            disabled={!props.value || props.status === "testing"} 
+                            style={{ whiteSpace: "nowrap" }}
+                        >
+                            {props.status === "testing" ? "..." : "Test"}
+                        </button>
+                        <StatusDot status={props.status} />
+                    </>
+                )}
             </div>
             {props.message && <span className={`muted ${props.status === "error" ? "text-warn" : ""}`}>{props.message}</span>}
         </div>
@@ -462,8 +535,9 @@ function ProviderSelect(props: { label: string; description: string; value: AIPr
         <div className="field-block">
             <label className="field-label">{props.label}</label>
             <select value={props.value} onChange={(e) => props.onChange(e.target.value as AIProvider)}>
-                <option value="groq">Groq (Fast)</option>
-                <option value="openai">OpenAI (Accurate)</option>
+                <option value="groq">Groq (Fast & Free)</option>
+                <option value="openai">OpenAI (Most Accurate)</option>
+                <option value="routeway">Routeway (Free Alternative)</option>
             </select>
             <span className="muted">{props.description}</span>
         </div>

@@ -16,8 +16,9 @@
     "tabs"
   ],
   "host_permissions": [
-    "*://*.linkedin.com/messaging*"
-  ],
+  "*://*.linkedin.com/messaging*",
+  "https://hooks.zapier.com/*"
+],
   "background": { 
     "service_worker": "background.js",
     "type": "module"
